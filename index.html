@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<meta charset="UTF-8">
+<title>Commander Deck Builder</title>
+<link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<h1>MTG Commander Deck Builder</h1>
+
+<label>Commander Name</label>
+<br>
+<input id="commanderInput" type="text" placeholder="Muldrotha, the Gravetide">
+
+<br><br>
+
+<label>Upload ManaBox CSV</label>
+<br>
+<input id="csvFile" type="file" accept=".csv">
+
+<br><br>
+
+<button onclick="generateDeck()">Generate Deck</button>
+
+<h2>Detected Themes</h2>
+<ul id="themes"></ul>
+
+<h2>Decklist</h2>
+<ul id="deck"></ul>
+
+<script src="script.js"></script>
+
+</body>
+</html>
