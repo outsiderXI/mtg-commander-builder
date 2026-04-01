@@ -8,6 +8,9 @@ const autocompleteList = document.getElementById("autocompleteList");
 const generateBtn = document.getElementById("generateBtn");
 const copyExportBtn = document.getElementById("copyExportBtn");
 
+const commanderImage = document.getElementById("commanderImage");
+const commanderMeta = document.getElementById("commanderMeta");
+
 const cardCache = new Map();
 
 let autocompleteTimer = null;
@@ -308,6 +311,22 @@ function toEdhrecSlug(name) {
     .replace(/\s+/g, "-");
 }
 
+function pickCommanderImage(data) {
+  if (data.image_uris?.normal) {
+    return data.image_uris.normal;
+  }
+
+  if (Array.isArray(data.card_faces)) {
+    for (const face of data.card_faces) {
+      if (face.image_uris?.normal) {
+        return face.image_uris.normal;
+      }
+    }
+  }
+
+  return "";
+}
+
 function convertScryfallCard(data) {
   const producedMana =
     Array.isArray(data.produced_mana) ? data.produced_mana :
@@ -317,12 +336,17 @@ function convertScryfallCard(data) {
   return {
     name: data.name,
     type: String(data.type_line || "").toLowerCase(),
+    rawType: String(data.type_line || ""),
     text: String(data.oracle_text || "").toLowerCase(),
+    rawText: String(data.oracle_text || ""),
     cmc: Number(data.cmc || 0),
     colors: Array.isArray(data.color_identity) ? data.color_identity : [],
     layout: String(data.layout || "").toLowerCase(),
     legalities: data.legalities || {},
     producedMana,
+    imageUrl: pickCommanderImage(data),
+    manaCost: String(data.mana_cost || ""),
+    scryfallUrl: data.scryfall_uri || "",
     raw: data
   };
 }
@@ -746,20 +770,14 @@ function evaluateNonbasicLand(card, commanderColors) {
   const relevantProduced = produced.filter((c) => commanderColors.includes(c));
 
   let score = 0;
-
   score += relevantProduced.length * 5;
+
+  const lowerName = card.name.toLowerCase();
 
   if (normalizeCardName(card.name) === "command tower") score += 10;
   if (normalizeCardName(card.name) === "exotic orchard") score += 8;
-
-  if (card.type.includes("fetch")) score += 7;
-  if (card.name.toLowerCase().includes("triome")) score += 8;
-  if (card.name.toLowerCase().includes("pathway")) score += 6;
-  if (card.text.includes("search your library for a plains or island")) score += 5;
-  if (card.text.includes("plains island") || card.text.includes("island swamp") || card.text.includes("swamp mountain") || card.text.includes("mountain forest") || card.text.includes("forest plains")) {
-    score += 4;
-  }
-
+  if (lowerName.includes("triome")) score += 8;
+  if (lowerName.includes("pathway")) score += 6;
   if (card.text.includes("add one mana of any color")) score += 7;
   if (card.text.includes("add one mana of any type")) score += 6;
 
@@ -1032,19 +1050,38 @@ Ramp: ${roleCounts.ramp}, Draw: ${roleCounts.draw}, Removal: ${roleCounts.remova
 Mana base: ${landText}`;
 }
 
+function displayCommanderCard(commanderData) {
+  if (commanderData?.imageUrl) {
+    commanderImage.src = commanderData.imageUrl;
+    commanderImage.classList.remove("hidden");
+  } else {
+    commanderImage.src = "";
+    commanderImage.classList.add("hidden");
+  }
+
+  const colorText = commanderData.colors.length ? commanderData.colors.join("") : "Colorless";
+  commanderMeta.textContent =
+    `Name: ${commanderData.name}
+Mana Cost: ${commanderData.manaCost || "-"}
+Type: ${commanderData.rawType || "-"}
+Color Identity: ${colorText}`;
+}
+
+function clearCommanderCard() {
+  commanderImage.src = "";
+  commanderImage.classList.add("hidden");
+  commanderMeta.textContent = "";
+}
+
 function generateMoxfieldExport(deck, commanderName) {
   const merged = mergeDeckCounts(deck);
 
-  const commanderLine = `1 ${commanderName}`;
-  const mainboardLines = merged.map((item) => `${item.count} ${item.name}`);
+  const lines = [`1 ${commanderName}`];
+  for (const item of merged) {
+    lines.push(`${item.count} ${item.name}`);
+  }
 
-  return [
-    "COMMANDER",
-    commanderLine,
-    "",
-    "MAINBOARD",
-    ...mainboardLines
-  ].join("\n");
+  return lines.join("\n");
 }
 
 function displayMoxfieldExport(deck, commanderName) {
@@ -1070,6 +1107,7 @@ async function generateDeck() {
   const file = document.getElementById("csvFile").files[0];
 
   clearLog();
+  clearCommanderCard();
   updateProgress(0, "Starting...");
   displayThemes([]);
   displayDeck([]);
@@ -1101,6 +1139,8 @@ async function generateDeck() {
     if (!canBeCommander(commanderData)) {
       throw new Error("Selected card does not appear to be a legal commander.");
     }
+
+    displayCommanderCard(commanderData);
 
     logMessage(`Commander found: ${commanderData.name} | Color identity: ${commanderData.colors.join("") || "Colorless"}`);
 
