@@ -6,8 +6,10 @@ const EDHREC_BASE = "https://json.edhrec.com/pages/commanders/";
 const commanderInput = document.getElementById("commanderInput");
 const autocompleteList = document.getElementById("autocompleteList");
 const generateBtn = document.getElementById("generateBtn");
+const copyExportBtn = document.getElementById("copyExportBtn");
 
 const cardCache = new Map();
+
 let autocompleteTimer = null;
 let activeAutocompleteIndex = -1;
 let currentAutocompleteItems = [];
@@ -30,6 +32,7 @@ const COLOR_TO_BASIC = {
 };
 
 generateBtn.addEventListener("click", generateDeck);
+copyExportBtn.addEventListener("click", copyMoxfieldExport);
 commanderInput.addEventListener("input", onCommanderInput);
 commanderInput.addEventListener("keydown", onAutocompleteKeydown);
 
@@ -68,6 +71,52 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function normalizeCardName(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function splitCsvLine(line) {
+  const result = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    const next = line[i + 1];
+
+    if (char === '"' && inQuotes && next === '"') {
+      current += '"';
+      i += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  result.push(current);
+  return result;
+}
+
+function renderAutocompleteLoading() {
+  autocompleteList.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = "autocomplete-item";
+  div.textContent = "Checking legal commanders...";
+  autocompleteList.appendChild(div);
+  autocompleteList.classList.remove("hidden");
+}
+
 async function onCommanderInput() {
   const query = commanderInput.value.trim();
 
@@ -83,10 +132,8 @@ async function onCommanderInput() {
   autocompleteTimer = setTimeout(async () => {
     try {
       renderAutocompleteLoading();
-
       const matches = await fetchCommanderAutocomplete(query);
       const legalMatches = await filterCommanderAutocomplete(matches);
-
       renderAutocomplete(legalMatches);
     } catch (error) {
       hideAutocomplete();
@@ -115,15 +162,6 @@ function onAutocompleteKeydown(event) {
   } else if (event.key === "Escape") {
     hideAutocomplete();
   }
-}
-
-function renderAutocompleteLoading() {
-  autocompleteList.innerHTML = "";
-  const div = document.createElement("div");
-  div.className = "autocomplete-item";
-  div.textContent = "Checking legal commanders...";
-  autocompleteList.appendChild(div);
-  autocompleteList.classList.remove("hidden");
 }
 
 async function fetchCommanderAutocomplete(query) {
@@ -170,8 +208,8 @@ function renderAutocomplete(items) {
     const div = document.createElement("div");
     div.className = "autocomplete-item";
     div.textContent = item;
-    div.addEventListener("click", () => selectAutocompleteItem(item));
     div.dataset.index = String(index);
+    div.addEventListener("click", () => selectAutocompleteItem(item));
     autocompleteList.appendChild(div);
   });
 
@@ -199,150 +237,17 @@ function hideAutocomplete() {
   activeAutocompleteIndex = -1;
 }
 
-async function generateDeck() {
-  const commanderName = commanderInput.value.trim();
-  const file = document.getElementById("csvFile").files[0];
-
-  clearLog();
-  updateProgress(0, "Starting...");
-  displayThemes([]);
-  displayDeck([]);
-  document.getElementById("deckSummary").textContent = "";
-
-  if (!commanderName || !file) {
-    alert("Enter a commander and upload a ManaBox CSV.");
-    updateProgress(0, "Idle");
-    return;
-  }
-
-  setGenerateEnabled(false);
-
-  try {
-    logMessage("Parsing uploaded CSV.");
-    updateProgress(5, "Parsing CSV...");
-    const collection = await parseCSV(file);
-    const collectionNames = Array.from(collection.keys());
-    logMessage(`Parsed ${collectionNames.length} unique cards from CSV.`);
-
-    updateProgress(10, "Validating commander...");
-    logMessage(`Fetching commander info for "${commanderName}" from Scryfall.`);
-    const commanderData = await getCommander(commanderName);
-
-    if (!commanderData) {
-      throw new Error("Commander not found on Scryfall.");
-    }
-
-    if (!canBeCommander(commanderData)) {
-      throw new Error("Selected card does not appear to be a legal commander.");
-    }
-
-    logMessage(`Commander found: ${commanderData.name} | Color identity: ${commanderData.colors.join("") || "Colorless"}`);
-
-    updateProgress(18, "Fetching EDHREC synergy data...");
-    logMessage("Loading commander recommendations from EDHREC.");
-    const edhrecCards = await getEDHREC(commanderData.name);
-
-    if (!edhrecCards.length) {
-      throw new Error("No EDHREC data returned for this commander.");
-    }
-
-    logMessage(`EDHREC returned ${edhrecCards.length} candidate cards.`);
-
-    updateProgress(28, "Detecting commander themes...");
-    logMessage("Analyzing top synergy cards to infer deck themes.");
-    const commanderThemes = await detectCommanderThemes(edhrecCards);
-    displayThemes(commanderThemes);
-    logMessage(`Detected themes: ${commanderThemes.join(", ") || "none"}`);
-
-    updateProgress(38, "Matching your collection...");
-    const ownedCandidates = edhrecCards.filter((c) => hasOwnedCard(collection, c.name));
-    logMessage(`${ownedCandidates.length} EDHREC cards also exist in your uploaded collection.`);
-
-    updateProgress(45, "Fetching owned card metadata from Scryfall...");
-    logMessage("Batching Scryfall collection requests for owned candidate cards.");
-    const ownedCardData = await fetchCardDataBatchWithProgress(
-      ownedCandidates.map((c) => c.name),
-      (done, total) => {
-        const pct = 45 + Math.floor((done / Math.max(total, 1)) * 20);
-        updateProgress(pct, "Fetching owned card metadata from Scryfall...", `Fetched ${done} / ${total}`);
-      }
-    );
-
-    logMessage(`Received metadata for ${ownedCardData.size} owned cards.`);
-
-    updateProgress(67, "Checking legality and scoring cards...");
-    const scoredNonlands = [];
-    let processed = 0;
-    const totalToScore = ownedCandidates.length;
-
-    for (const edhrecCard of ownedCandidates) {
-      processed += 1;
-      const normalizedName = normalizeCardName(edhrecCard.name);
-      const card = ownedCardData.get(normalizedName);
-
-      if (!card) {
-        maybeUpdateScoringProgress(processed, totalToScore);
-        continue;
-      }
-
-      if (isBasicLand(card.name)) {
-        maybeUpdateScoringProgress(processed, totalToScore);
-        continue;
-      }
-
-      if (!legalForCommander(card.colors, commanderData.colors)) {
-        maybeUpdateScoringProgress(processed, totalToScore);
-        continue;
-      }
-
-      const role = detectRole(card);
-      const score = scoreCard(card, edhrecCard, commanderThemes);
-
-      scoredNonlands.push({
-        name: card.name,
-        role,
-        score,
-        type: card.type,
-        cmc: card.cmc,
-        colors: card.colors
-      });
-
-      maybeUpdateScoringProgress(processed, totalToScore);
-    }
-
-    function maybeUpdateScoringProgress(done, total) {
-      if (done % 20 === 0 || done === total) {
-        updateProgress(
-          67 + Math.floor((done / Math.max(total, 1)) * 15),
-          "Checking legality and scoring cards...",
-          `Processed ${done} / ${total}`
-        );
-      }
-    }
-
-    logMessage(`After legality checks, ${scoredNonlands.length} nonland/nonbasic cards remain.`);
-
-    updateProgress(84, "Building deck structure...");
-    logMessage("Selecting nonland cards, then generating a basic land mana base.");
-    const finalDeck = buildDeckFromScoredPool(scoredNonlands, commanderData.colors);
-    logMessage(`Built deck with ${finalDeck.length} total cards including basics.`);
-
-    updateProgress(97, "Rendering results...");
-    displayDeck(finalDeck);
-    displayDeckSummary(finalDeck, commanderData.name, commanderData.colors);
-
-    updateProgress(100, "Deck complete!", `${finalDeck.length} cards selected`);
-    logMessage("Finished.");
-  } catch (error) {
-    updateProgress(0, "Error");
-    logMessage(`ERROR: ${error.message}`);
-    alert(error.message);
-  } finally {
-    setGenerateEnabled(true);
-  }
+function isBasicLand(name) {
+  const normalized = normalizeCardName(name);
+  return BASIC_LANDS.some((land) => normalizeCardName(land.name) === normalized);
 }
 
-function parseCSV(file) {
+function hasOwnedCard(collection, cardName) {
+  const normalized = normalizeCardName(cardName);
+  return collection.has(normalized) || isBasicLand(cardName);
+}
+
+async function parseCSV(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
 
@@ -375,10 +280,9 @@ function parseCSV(file) {
           if (!rawName) continue;
 
           const quantity = Number.parseInt(rawQty, 10);
-          const normalizedName = normalizeCardName(rawName);
-
           if (!Number.isFinite(quantity) || quantity <= 0) continue;
 
+          const normalizedName = normalizeCardName(rawName);
           collection.set(normalizedName, (collection.get(normalizedName) || 0) + quantity);
         }
 
@@ -393,60 +297,34 @@ function parseCSV(file) {
   });
 }
 
-function splitCsvLine(line) {
-  const result = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    const next = line[i + 1];
-
-    if (char === '"' && inQuotes && next === '"') {
-      current += '"';
-      i++;
-      continue;
-    }
-
-    if (char === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-
-    if (char === "," && !inQuotes) {
-      result.push(current);
-      current = "";
-      continue;
-    }
-
-    current += char;
-  }
-
-  result.push(current);
-  return result;
+function toEdhrecSlug(name) {
+  return name
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/,/g, "")
+    .replace(/\//g, " ")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-");
 }
 
-function normalizeCardName(name) {
-  return String(name || "").trim().toLowerCase();
-}
+function convertScryfallCard(data) {
+  const producedMana =
+    Array.isArray(data.produced_mana) ? data.produced_mana :
+    Array.isArray(data.color_identity) ? data.color_identity :
+    [];
 
-function hasOwnedCard(collection, cardName) {
-  const normalized = normalizeCardName(cardName);
-
-  if (collection.has(normalized)) {
-    return true;
-  }
-
-  if (isBasicLand(cardName)) {
-    return true;
-  }
-
-  return false;
-}
-
-function isBasicLand(name) {
-  const normalized = normalizeCardName(name);
-  return BASIC_LANDS.some((land) => normalizeCardName(land.name) === normalized);
+  return {
+    name: data.name,
+    type: String(data.type_line || "").toLowerCase(),
+    text: String(data.oracle_text || "").toLowerCase(),
+    cmc: Number(data.cmc || 0),
+    colors: Array.isArray(data.color_identity) ? data.color_identity : [],
+    layout: String(data.layout || "").toLowerCase(),
+    legalities: data.legalities || {},
+    producedMana,
+    raw: data
+  };
 }
 
 async function getCommander(name) {
@@ -496,32 +374,6 @@ async function getEDHREC(commanderName) {
   return Array.from(deduped.values());
 }
 
-function toEdhrecSlug(name) {
-  return name
-    .toLowerCase()
-    .replace(/['’]/g, "")
-    .replace(/,/g, "")
-    .replace(/\//g, " ")
-    .replace(/[^a-z0-9\s-]/g, "")
-    .trim()
-    .replace(/\s+/g, "-");
-}
-
-function convertScryfallCard(data) {
-  return {
-    name: data.name,
-    type: String(data.type_line || "").toLowerCase(),
-    text: String(data.oracle_text || "").toLowerCase(),
-    cmc: Number(data.cmc || 0),
-    colors: Array.isArray(data.color_identity) ? data.color_identity : [],
-    layout: String(data.layout || "").toLowerCase(),
-    rarity: String(data.rarity || "").toLowerCase(),
-    legalities: data.legalities || {},
-    rawTypeLine: String(data.type_line || ""),
-    rawOracleText: String(data.oracle_text || "")
-  };
-}
-
 async function fetchCardDataBatchWithProgress(cardNames, progressCallback) {
   const uniqueNames = Array.from(new Set(cardNames.map(normalizeCardName)));
   const missingNames = uniqueNames.filter((name) => !cardCache.has(name));
@@ -530,7 +382,11 @@ async function fetchCardDataBatchWithProgress(cardNames, progressCallback) {
 
   if (total === 0) {
     if (progressCallback) progressCallback(0, 0);
-    return new Map(uniqueNames.map((name) => [name, cardCache.get(name)]).filter(([, value]) => value));
+    return new Map(
+      uniqueNames
+        .map((name) => [name, cardCache.get(name)])
+        .filter(([, value]) => value)
+    );
   }
 
   const chunkSize = 75;
@@ -566,7 +422,9 @@ async function fetchCardDataBatchWithProgress(cardNames, progressCallback) {
     }
 
     done += chunk.length;
-    if (progressCallback) progressCallback(done, total);
+    if (progressCallback) {
+      progressCallback(done, total);
+    }
 
     await sleep(80);
   }
@@ -600,9 +458,14 @@ function canBeCommander(card) {
 async function detectCommanderThemes(edhrecCards) {
   const topSynergy = [...edhrecCards]
     .sort((a, b) => b.synergy - a.synergy)
-    .slice(0, 24);
+    .slice(0, 36);
 
   const themeCounts = {
+    "group hug": 0,
+    counters: 0,
+    cantrips: 0,
+    wheels: 0,
+    "opponent draw": 0,
     graveyard: 0,
     tokens: 0,
     artifacts: 0,
@@ -610,9 +473,12 @@ async function detectCommanderThemes(edhrecCards) {
     lands: 0,
     spellslinger: 0,
     sacrifice: 0,
-    counters: 0,
+    countersMatter: 0,
     lifegain: 0,
-    reanimator: 0
+    reanimator: 0,
+    blink: 0,
+    goWide: 0,
+    voltron: 0
   };
 
   const topCardMap = await fetchCardDataBatchWithProgress(topSynergy.map((c) => c.name));
@@ -624,26 +490,86 @@ async function detectCommanderThemes(edhrecCards) {
     const text = card.text;
     const type = card.type;
 
-    if (text.includes("graveyard")) themeCounts.graveyard += 1;
-    if (text.includes("create") && text.includes("token")) themeCounts.tokens += 1;
-    if (type.includes("artifact")) themeCounts.artifacts += 1;
-    if (type.includes("enchantment")) themeCounts.enchantments += 1;
-    if (text.includes("land") || text.includes("landfall")) themeCounts.lands += 1;
-    if (type.includes("instant") || type.includes("sorcery") || text.includes("cast an instant") || text.includes("cast a sorcery")) {
+    if (text.includes("each player draws") || text.includes("each opponent draws")) {
+      themeCounts["group hug"] += 3;
+      themeCounts["opponent draw"] += 2;
+    }
+
+    if (
+      text.includes("target opponent draws") ||
+      text.includes("an opponent draws") ||
+      text.includes("that player draws")
+    ) {
+      themeCounts["group hug"] += 2;
+      themeCounts["opponent draw"] += 3;
+    }
+
+    if (
+      text.includes("draw a card") &&
+      (type.includes("instant") || type.includes("sorcery")) &&
+      card.cmc <= 2
+    ) {
+      themeCounts.cantrips += 3;
       themeCounts.spellslinger += 1;
     }
-    if (text.includes("sacrifice")) themeCounts.sacrifice += 1;
-    if (text.includes("+1/+1 counter") || text.includes("counter on")) themeCounts.counters += 1;
-    if (text.includes("gain life") || text.includes("life total")) themeCounts.lifegain += 1;
+
+    if (
+      text.includes("each player discards") ||
+      text.includes("then draws") ||
+      text.includes("discard their hand") ||
+      text.includes("wheel")
+    ) {
+      themeCounts.wheels += 3;
+    }
+
+    if (
+      text.includes("+1/+1 counter") ||
+      text.includes("put a counter on") ||
+      text.includes("put counters on")
+    ) {
+      themeCounts.counters += 3;
+      themeCounts.countersMatter += 2;
+    }
+
+    if (text.includes("proliferate") || text.includes("double the number of")) {
+      themeCounts.counters += 2;
+      themeCounts.countersMatter += 3;
+    }
+
+    if (text.includes("graveyard")) themeCounts.graveyard += 2;
+    if (text.includes("create") && text.includes("token")) {
+      themeCounts.tokens += 2;
+      themeCounts.goWide += 1;
+    }
+    if (type.includes("artifact")) themeCounts.artifacts += 1;
+    if (type.includes("enchantment")) themeCounts.enchantments += 1;
+    if (text.includes("landfall") || text.includes("search your library for a land")) themeCounts.lands += 2;
+    if (type.includes("instant") || type.includes("sorcery")) themeCounts.spellslinger += 1;
+    if (text.includes("sacrifice")) themeCounts.sacrifice += 2;
+    if (text.includes("gain life") || text.includes("life total")) themeCounts.lifegain += 2;
     if (text.includes("return target creature card from your graveyard") || text.includes("reanimate")) {
-      themeCounts.reanimator += 1;
+      themeCounts.reanimator += 3;
+    }
+    if (
+      text.includes("exile another target") ||
+      text.includes("return it to the battlefield") ||
+      text.includes("blink")
+    ) {
+      themeCounts.blink += 3;
+    }
+    if (
+      text.includes("equipped creature") ||
+      text.includes("enchanted creature") ||
+      text.includes("commander damage")
+    ) {
+      themeCounts.voltron += 2;
     }
   }
 
   return Object.entries(themeCounts)
     .sort((a, b) => b[1] - a[1])
-    .filter(([, count]) => count > 0)
-    .slice(0, 4)
+    .filter(([, count]) => count > 1)
+    .slice(0, 5)
     .map(([theme]) => theme);
 }
 
@@ -697,15 +623,54 @@ function detectCardTags(card) {
   const type = card.type;
 
   if (text.includes("graveyard")) tags.push("graveyard");
-  if (text.includes("token")) tags.push("tokens");
+  if (text.includes("token")) {
+    tags.push("tokens");
+    tags.push("goWide");
+  }
   if (type.includes("artifact")) tags.push("artifacts");
   if (type.includes("enchantment")) tags.push("enchantments");
-  if (text.includes("land") || text.includes("landfall")) tags.push("lands");
+  if (text.includes("landfall") || text.includes("search your library for a land")) tags.push("lands");
   if (type.includes("instant") || type.includes("sorcery")) tags.push("spellslinger");
   if (text.includes("sacrifice")) tags.push("sacrifice");
-  if (text.includes("+1/+1 counter") || text.includes("counter on")) tags.push("counters");
+  if (text.includes("+1/+1 counter") || text.includes("put a counter on") || text.includes("put counters on")) {
+    tags.push("counters");
+    tags.push("countersMatter");
+  }
   if (text.includes("gain life") || text.includes("life total")) tags.push("lifegain");
   if (text.includes("return target creature card from your graveyard")) tags.push("reanimator");
+
+  if (
+    text.includes("each player draws") ||
+    text.includes("each opponent draws") ||
+    text.includes("target opponent draws") ||
+    text.includes("an opponent draws")
+  ) {
+    tags.push("group hug");
+    tags.push("opponent draw");
+  }
+
+  if (
+    text.includes("draw a card") &&
+    (type.includes("instant") || type.includes("sorcery")) &&
+    card.cmc <= 2
+  ) {
+    tags.push("cantrips");
+  }
+
+  if (
+    text.includes("each player discards") ||
+    text.includes("then draws") ||
+    text.includes("discard their hand")
+  ) {
+    tags.push("wheels");
+  }
+
+  if (
+    text.includes("exile another target") ||
+    text.includes("return it to the battlefield")
+  ) {
+    tags.push("blink");
+  }
 
   return tags;
 }
@@ -729,10 +694,23 @@ function scoreCard(card, edhrecCard, commanderThemes) {
 
   const tags = detectCardTags(card);
   let themeBonus = 0;
+
   for (const tag of tags) {
     if (commanderThemes.includes(tag)) {
-      themeBonus += 4;
+      themeBonus += 5;
     }
+  }
+
+  if (commanderThemes.includes("group hug") && tags.includes("opponent draw")) {
+    themeBonus += 4;
+  }
+
+  if (commanderThemes.includes("counters") && tags.includes("counters")) {
+    themeBonus += 4;
+  }
+
+  if (commanderThemes.includes("cantrips") && tags.includes("cantrips")) {
+    themeBonus += 3;
   }
 
   return synergyScore + popularityScore + roleBonus + curveBonus + themeBonus;
@@ -747,7 +725,142 @@ function legalForCommander(cardColors, commanderColors) {
   return true;
 }
 
-function buildDeckFromScoredPool(scoredNonlands, commanderColors) {
+function recommendLandCount(commanderColors) {
+  if (commanderColors.length === 0) return 38;
+  if (commanderColors.length === 1) return 36;
+  if (commanderColors.length === 2) return 37;
+  return 38;
+}
+
+function landEntersTappedPenalty(card) {
+  const text = card.text;
+  if (text.includes("enters tapped")) return 1.5;
+  return 0;
+}
+
+function evaluateNonbasicLand(card, commanderColors) {
+  if (!card.type.includes("land")) return null;
+  if (isBasicLand(card.name)) return null;
+
+  const produced = Array.isArray(card.producedMana) ? card.producedMana : [];
+  const relevantProduced = produced.filter((c) => commanderColors.includes(c));
+
+  let score = 0;
+
+  score += relevantProduced.length * 5;
+
+  if (normalizeCardName(card.name) === "command tower") score += 10;
+  if (normalizeCardName(card.name) === "exotic orchard") score += 8;
+
+  if (card.type.includes("fetch")) score += 7;
+  if (card.name.toLowerCase().includes("triome")) score += 8;
+  if (card.name.toLowerCase().includes("pathway")) score += 6;
+  if (card.text.includes("search your library for a plains or island")) score += 5;
+  if (card.text.includes("plains island") || card.text.includes("island swamp") || card.text.includes("swamp mountain") || card.text.includes("mountain forest") || card.text.includes("forest plains")) {
+    score += 4;
+  }
+
+  if (card.text.includes("add one mana of any color")) score += 7;
+  if (card.text.includes("add one mana of any type")) score += 6;
+
+  score -= landEntersTappedPenalty(card);
+
+  return {
+    name: card.name,
+    role: "land",
+    score,
+    type: card.type,
+    cmc: 0,
+    colors: produced
+  };
+}
+
+function buildNonbasicManaBase(collection, ownedCardData, commanderColors, targetLandCount) {
+  const landPool = [];
+
+  for (const [normalizedName, quantity] of collection.entries()) {
+    const card = ownedCardData.get(normalizedName);
+    if (!card) continue;
+    if (!card.type.includes("land")) continue;
+    if (isBasicLand(card.name)) continue;
+    if (!legalForCommander(card.colors, commanderColors)) continue;
+
+    const landCandidate = evaluateNonbasicLand(card, commanderColors);
+    if (!landCandidate) continue;
+
+    const copiesAllowed = Math.min(quantity, 1);
+    for (let i = 0; i < copiesAllowed; i++) {
+      landPool.push({ ...landCandidate });
+    }
+  }
+
+  landPool.sort((a, b) => b.score - a.score);
+
+  const selected = [];
+  const used = new Set();
+
+  for (const land of landPool) {
+    if (selected.length >= targetLandCount) break;
+    const key = normalizeCardName(land.name);
+    if (used.has(key)) continue;
+
+    selected.push(land);
+    used.add(key);
+  }
+
+  return selected;
+}
+
+function buildBasicManaBase(commanderColors, landCountNeeded, selectedNonbasics = []) {
+  if (landCountNeeded <= 0) return [];
+
+  if (commanderColors.length === 0) {
+    return Array.from({ length: landCountNeeded }, () => ({
+      name: "Wastes",
+      role: "land",
+      score: 0,
+      type: "basic land",
+      cmc: 0,
+      colors: []
+    }));
+  }
+
+  const sourceCounts = {};
+  for (const color of commanderColors) {
+    sourceCounts[color] = 0;
+  }
+
+  for (const land of selectedNonbasics) {
+    const produced = Array.isArray(land.colors) ? land.colors : [];
+    for (const color of produced) {
+      if (sourceCounts[color] !== undefined) {
+        sourceCounts[color] += 1;
+      }
+    }
+  }
+
+  const lands = [];
+  const colorsSorted = [...commanderColors].sort((a, b) => sourceCounts[a] - sourceCounts[b]);
+
+  for (let i = 0; i < landCountNeeded; i++) {
+    colorsSorted.sort((a, b) => sourceCounts[a] - sourceCounts[b]);
+    const color = colorsSorted[0];
+    sourceCounts[color] += 1;
+
+    lands.push({
+      name: COLOR_TO_BASIC[color],
+      role: "land",
+      score: 0,
+      type: "basic land",
+      cmc: 0,
+      colors: [color]
+    });
+  }
+
+  return lands;
+}
+
+function buildDeckFromScoredPool(scoredNonlands, commanderColors, collection, ownedCardData) {
   const deck = [];
   const usedNames = new Set();
 
@@ -783,12 +896,14 @@ function buildDeckFromScoredPool(scoredNonlands, commanderColors) {
 
   for (const [role, count] of Object.entries(targets)) {
     let addedForRole = 0;
+
     for (const card of byRole[role]) {
       if (deck.length >= targetNonlandCount) break;
-      if (usedNames.has(normalizeCardName(card.name))) continue;
+      const key = normalizeCardName(card.name);
+      if (usedNames.has(key)) continue;
 
       deck.push(card);
-      usedNames.add(normalizeCardName(card.name));
+      usedNames.add(key);
       addedForRole += 1;
 
       if (addedForRole >= count) break;
@@ -800,70 +915,43 @@ function buildDeckFromScoredPool(scoredNonlands, commanderColors) {
 
   for (const card of remaining) {
     if (deck.length >= targetNonlandCount) break;
-    if (usedNames.has(normalizeCardName(card.name))) continue;
+    const key = normalizeCardName(card.name);
+    if (usedNames.has(key)) continue;
 
     deck.push(card);
-    usedNames.add(normalizeCardName(card.name));
+    usedNames.add(key);
   }
 
-  const lands = buildBasicManaBase(commanderColors, targetLandCount);
+  const selectedNonbasicLands = buildNonbasicManaBase(collection, ownedCardData, commanderColors, targetLandCount);
+  const remainingBasicCount = Math.max(0, targetLandCount - selectedNonbasicLands.length);
+  const basicLands = buildBasicManaBase(commanderColors, remainingBasicCount, selectedNonbasicLands);
 
-  return [...deck, ...lands].slice(0, 99);
+  return [...deck, ...selectedNonbasicLands, ...basicLands].slice(0, 99);
 }
 
-function recommendLandCount(commanderColors) {
-  if (commanderColors.length === 0) return 38;
-  if (commanderColors.length === 1) return 36;
-  if (commanderColors.length === 2) return 37;
-  return 38;
-}
+function mergeDeckCounts(deck) {
+  const map = new Map();
 
-function buildBasicManaBase(commanderColors, landCount) {
-  if (landCount <= 0) return [];
+  for (const card of deck) {
+    const key = normalizeCardName(card.name);
 
-  if (commanderColors.length === 0) {
-    return Array.from({ length: landCount }, () => ({
-      name: "Wastes",
-      role: "land",
-      score: 0,
-      type: "basic land",
-      cmc: 0,
-      colors: []
-    }));
-  }
-
-  const colors = [...commanderColors];
-  const colorWeights = {};
-  for (const color of colors) {
-    colorWeights[color] = 1;
-  }
-
-  const basePerColor = Math.floor(landCount / colors.length);
-  let remainder = landCount % colors.length;
-
-  const lands = [];
-
-  for (const color of colors) {
-    let count = basePerColor;
-    if (remainder > 0) {
-      count += 1;
-      remainder -= 1;
-    }
-
-    const landName = COLOR_TO_BASIC[color];
-    for (let i = 0; i < count; i++) {
-      lands.push({
-        name: landName,
-        role: "land",
-        score: 0,
-        type: "basic land",
-        cmc: 0,
-        colors: [color]
+    if (!map.has(key)) {
+      map.set(key, {
+        name: card.name,
+        role: card.role,
+        score: card.score || 0,
+        count: 1
       });
+    } else {
+      map.get(key).count += 1;
     }
   }
 
-  return lands;
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.role === "land" && b.role !== "land") return 1;
+    if (a.role !== "land" && b.role === "land") return -1;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 function displayThemes(themes) {
@@ -896,37 +984,15 @@ function displayDeck(deck) {
 
   for (const item of merged) {
     const li = document.createElement("li");
+
     if (item.role === "land") {
       li.textContent = `${item.count}x ${item.name} — ${item.role}`;
     } else {
       li.textContent = `${item.count}x ${item.name} — ${item.role} — score ${item.score.toFixed(2)}`;
     }
+
     ul.appendChild(li);
   }
-}
-
-function mergeDeckCounts(deck) {
-  const map = new Map();
-
-  for (const card of deck) {
-    const key = normalizeCardName(card.name);
-    if (!map.has(key)) {
-      map.set(key, {
-        name: card.name,
-        role: card.role,
-        score: card.score || 0,
-        count: 1
-      });
-    } else {
-      map.get(key).count += 1;
-    }
-  }
-
-  return Array.from(map.values()).sort((a, b) => {
-    if (a.role === "land" && b.role !== "land") return 1;
-    if (a.role !== "land" && b.role === "land") return -1;
-    return a.name.localeCompare(b.name);
-  });
 }
 
 function displayDeckSummary(deck, commanderName, commanderColors) {
@@ -964,4 +1030,193 @@ Color Identity: ${colorText}
 Deck cards: ${deck.length}
 Ramp: ${roleCounts.ramp}, Draw: ${roleCounts.draw}, Removal: ${roleCounts.removal}, Wipes: ${roleCounts.wipe}, Synergy: ${roleCounts.synergy}, Lands: ${roleCounts.land}
 Mana base: ${landText}`;
+}
+
+function generateMoxfieldExport(deck, commanderName) {
+  const merged = mergeDeckCounts(deck);
+
+  const commanderLine = `1 ${commanderName}`;
+  const mainboardLines = merged.map((item) => `${item.count} ${item.name}`);
+
+  return [
+    "COMMANDER",
+    commanderLine,
+    "",
+    "MAINBOARD",
+    ...mainboardLines
+  ].join("\n");
+}
+
+function displayMoxfieldExport(deck, commanderName) {
+  document.getElementById("moxfieldExport").value = generateMoxfieldExport(deck, commanderName);
+}
+
+async function copyMoxfieldExport() {
+  const box = document.getElementById("moxfieldExport");
+  if (!box.value.trim()) return;
+
+  try {
+    await navigator.clipboard.writeText(box.value);
+    alert("Moxfield export copied.");
+  } catch (error) {
+    box.select();
+    document.execCommand("copy");
+    alert("Moxfield export copied.");
+  }
+}
+
+async function generateDeck() {
+  const commanderName = commanderInput.value.trim();
+  const file = document.getElementById("csvFile").files[0];
+
+  clearLog();
+  updateProgress(0, "Starting...");
+  displayThemes([]);
+  displayDeck([]);
+  document.getElementById("deckSummary").textContent = "";
+  document.getElementById("moxfieldExport").value = "";
+
+  if (!commanderName || !file) {
+    alert("Enter a commander and upload a ManaBox CSV.");
+    updateProgress(0, "Idle");
+    return;
+  }
+
+  setGenerateEnabled(false);
+
+  try {
+    logMessage("Parsing uploaded CSV.");
+    updateProgress(5, "Parsing CSV...");
+    const collection = await parseCSV(file);
+    logMessage(`Parsed ${collection.size} unique cards from CSV.`);
+
+    updateProgress(10, "Validating commander...");
+    logMessage(`Fetching commander info for "${commanderName}" from Scryfall.`);
+    const commanderData = await getCommander(commanderName);
+
+    if (!commanderData) {
+      throw new Error("Commander not found on Scryfall.");
+    }
+
+    if (!canBeCommander(commanderData)) {
+      throw new Error("Selected card does not appear to be a legal commander.");
+    }
+
+    logMessage(`Commander found: ${commanderData.name} | Color identity: ${commanderData.colors.join("") || "Colorless"}`);
+
+    updateProgress(18, "Fetching EDHREC synergy data...");
+    logMessage("Loading commander recommendations from EDHREC.");
+    const edhrecCards = await getEDHREC(commanderData.name);
+
+    if (!edhrecCards.length) {
+      throw new Error("No EDHREC data returned for this commander.");
+    }
+
+    logMessage(`EDHREC returned ${edhrecCards.length} candidate cards.`);
+
+    updateProgress(28, "Detecting commander themes...");
+    logMessage("Analyzing top synergy cards to infer deck themes.");
+    const commanderThemes = await detectCommanderThemes(edhrecCards);
+    displayThemes(commanderThemes);
+    logMessage(`Detected themes: ${commanderThemes.join(", ") || "none"}`);
+
+    updateProgress(38, "Matching your collection...");
+    const ownedCandidates = edhrecCards.filter((c) => hasOwnedCard(collection, c.name));
+    logMessage(`${ownedCandidates.length} EDHREC cards overlap with your collection or basic lands.`);
+
+    updateProgress(46, "Fetching owned card metadata from Scryfall...");
+    logMessage("Batching Scryfall metadata requests for owned EDHREC candidates.");
+    const ownedCardData = await fetchCardDataBatchWithProgress(
+      ownedCandidates.map((c) => c.name),
+      (done, total) => {
+        const pct = 46 + Math.floor((done / Math.max(total, 1)) * 18);
+        updateProgress(pct, "Fetching owned card metadata from Scryfall...", `Fetched ${done} / ${total}`);
+      }
+    );
+
+    logMessage(`Received metadata for ${ownedCardData.size} owned candidate cards.`);
+
+    updateProgress(66, "Fetching land metadata...");
+    const allOwnedNames = Array.from(collection.keys());
+    logMessage("Loading metadata for all owned cards so the mana base can use real nonbasic lands.");
+    const allOwnedCardData = await fetchCardDataBatchWithProgress(
+      allOwnedNames,
+      (done, total) => {
+        const pct = 66 + Math.floor((done / Math.max(total, 1)) * 10);
+        updateProgress(pct, "Fetching land metadata...", `Fetched ${done} / ${total}`);
+      }
+    );
+
+    updateProgress(78, "Checking legality and scoring cards...");
+    const scoredNonlands = [];
+    let processed = 0;
+    const totalToScore = ownedCandidates.length;
+
+    for (const edhrecCard of ownedCandidates) {
+      processed += 1;
+
+      const normalizedName = normalizeCardName(edhrecCard.name);
+      const card = ownedCardData.get(normalizedName);
+
+      if (!card) {
+        maybeUpdateScoringProgress(processed, totalToScore);
+        continue;
+      }
+
+      if (card.type.includes("land")) {
+        maybeUpdateScoringProgress(processed, totalToScore);
+        continue;
+      }
+
+      if (!legalForCommander(card.colors, commanderData.colors)) {
+        maybeUpdateScoringProgress(processed, totalToScore);
+        continue;
+      }
+
+      const role = detectRole(card);
+      const score = scoreCard(card, edhrecCard, commanderThemes);
+
+      scoredNonlands.push({
+        name: card.name,
+        role,
+        score,
+        type: card.type,
+        cmc: card.cmc,
+        colors: card.colors
+      });
+
+      maybeUpdateScoringProgress(processed, totalToScore);
+    }
+
+    function maybeUpdateScoringProgress(done, total) {
+      if (done % 20 === 0 || done === total) {
+        updateProgress(
+          78 + Math.floor((done / Math.max(total, 1)) * 10),
+          "Checking legality and scoring cards...",
+          `Processed ${done} / ${total}`
+        );
+      }
+    }
+
+    logMessage(`After legality checks, ${scoredNonlands.length} nonland cards remain in the candidate pool.`);
+
+    updateProgress(90, "Building deck structure and mana base...");
+    logMessage("Selecting spells, choosing owned nonbasic lands, and filling the rest with basics.");
+    const finalDeck = buildDeckFromScoredPool(scoredNonlands, commanderData.colors, collection, allOwnedCardData);
+    logMessage(`Built final deck with ${finalDeck.length} cards.`);
+
+    updateProgress(97, "Rendering results...");
+    displayDeck(finalDeck);
+    displayDeckSummary(finalDeck, commanderData.name, commanderData.colors);
+    displayMoxfieldExport(finalDeck, commanderData.name);
+
+    updateProgress(100, "Deck complete!", `${finalDeck.length} cards selected`);
+    logMessage("Finished.");
+  } catch (error) {
+    updateProgress(0, "Error");
+    logMessage(`ERROR: ${error.message}`);
+    alert(error.message);
+  } finally {
+    setGenerateEnabled(true);
+  }
 }
