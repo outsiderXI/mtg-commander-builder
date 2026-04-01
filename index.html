@@ -29,14 +29,6 @@
     </div>
 
     <div class="panel">
-      <h2>Commander</h2>
-      <div class="commander-card-wrap">
-        <img id="commanderImage" class="commander-image hidden" alt="Commander card image" />
-        <div id="commanderMeta" class="commander-meta"></div>
-      </div>
-    </div>
-
-    <div class="panel">
       <h2>Progress</h2>
       <div id="progressContainer">
         <div id="progressBar"></div>
@@ -52,22 +44,22 @@
 
     <div class="results-grid">
       <div class="panel">
-        <h2>Detected Themes</h2>
-        <ul id="themes"></ul>
+        <h2>Commander</h2>
+        <div class="commander-column">
+          <img id="commanderImage" class="commander-image hidden" alt="Commander card image" />
+          <div id="commanderMeta" class="commander-meta"></div>
+
+          <h3 class="themes-heading">Detected Themes</h3>
+          <ul id="themes"></ul>
+        </div>
       </div>
 
       <div class="panel">
-        <h2>Generated Deck</h2>
+        <h2>Decklist</h2>
         <div id="deckSummary" class="deck-summary"></div>
-        <ul id="deck"></ul>
+        <textarea id="moxfieldExport" class="export-box" readonly></textarea>
+        <button id="copyExportBtn" type="button">Copy Decklist</button>
       </div>
-    </div>
-
-    <div class="panel">
-      <h2>Moxfield Export</h2>
-      <p>Copy this and paste it into Moxfield.</p>
-      <textarea id="moxfieldExport" class="export-box" readonly></textarea>
-      <button id="copyExportBtn" type="button">Copy Export</button>
     </div>
   </div>
 
