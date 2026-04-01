@@ -140,6 +140,19 @@ button:disabled {
   white-space: pre-line;
 }
 
+.deck-bracket {
+  margin-bottom: 12px;
+  font-weight: 700;
+  color: #fcd34d;
+  white-space: pre-line;
+}
+
+.deck-game-changers {
+  margin-bottom: 12px;
+  color: #fca5a5;
+  white-space: pre-line;
+}
+
 ul {
   padding-left: 18px;
 }
