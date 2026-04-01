@@ -382,7 +382,7 @@ async function getCommander(name) {
 
 async function getEDHREC(commanderName) {
   const slug = toEdhrecSlug(commanderName);
-  const response = await fetch(`${EDHREC_BASE}${slug}.json}`);
+  const response = await fetch(`${EDHREC_BASE}${slug}.json`);
 
   if (!response.ok) {
     throw new Error("Failed to fetch EDHREC commander data.");
