@@ -34,6 +34,14 @@ const COLOR_TO_BASIC = {
   G: "Forest"
 };
 
+const TRIBAL_TYPES = [
+  "angel", "artifact creature", "bear", "bird", "cat", "cleric", "demon", "devil",
+  "dinosaur", "dragon", "drake", "druid", "elf", "faerie", "goblin", "human",
+  "hydra", "knight", "merfolk", "pirate", "rat", "samurai", "shaman", "sliver",
+  "snake", "soldier", "spirit", "treefolk", "vampire", "warlock", "warrior",
+  "wizard", "wolf", "zombie"
+];
+
 generateBtn.addEventListener("click", generateDeck);
 copyExportBtn.addEventListener("click", copyMoxfieldExport);
 commanderInput.addEventListener("input", onCommanderInput);
@@ -468,15 +476,40 @@ function canBeCommander(card) {
   const type = card.type;
   const text = card.text;
 
-  if (type.includes("legendary creature")) {
-    return true;
-  }
-
-  if (text.includes("can be your commander")) {
-    return true;
-  }
+  if (type.includes("legendary creature")) return true;
+  if (text.includes("can be your commander")) return true;
 
   return false;
+}
+
+function detectTribalThemes(cards) {
+  const counts = {};
+
+  for (const tribalType of TRIBAL_TYPES) {
+    counts[tribalType] = 0;
+  }
+
+  for (const card of cards) {
+    if (!card) continue;
+
+    const type = card.type;
+    const text = card.text;
+    const combined = `${type} ${text}`;
+
+    for (const tribalType of TRIBAL_TYPES) {
+      const pattern = new RegExp(`\\b${tribalType}\\b`, "g");
+      const matches = combined.match(pattern);
+      if (matches) {
+        counts[tribalType] += matches.length;
+      }
+    }
+  }
+
+  return Object.entries(counts)
+    .filter(([, count]) => count >= 3)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .map(([tribe]) => `${tribe} tribal`);
 }
 
 async function detectCommanderThemes(edhrecCards) {
@@ -506,10 +539,13 @@ async function detectCommanderThemes(edhrecCards) {
   };
 
   const topCardMap = await fetchCardDataBatchWithProgress(topSynergy.map((c) => c.name));
+  const topCards = [];
 
   for (const entry of topSynergy) {
     const card = topCardMap.get(normalizeCardName(entry.name));
     if (!card) continue;
+
+    topCards.push(card);
 
     const text = card.text;
     const type = card.type;
@@ -561,19 +597,23 @@ async function detectCommanderThemes(edhrecCards) {
     }
 
     if (text.includes("graveyard")) themeCounts.graveyard += 2;
+
     if (text.includes("create") && text.includes("token")) {
       themeCounts.tokens += 2;
       themeCounts.goWide += 1;
     }
+
     if (type.includes("artifact")) themeCounts.artifacts += 1;
     if (type.includes("enchantment")) themeCounts.enchantments += 1;
     if (text.includes("landfall") || text.includes("search your library for a land")) themeCounts.lands += 2;
     if (type.includes("instant") || type.includes("sorcery")) themeCounts.spellslinger += 1;
     if (text.includes("sacrifice")) themeCounts.sacrifice += 2;
     if (text.includes("gain life") || text.includes("life total")) themeCounts.lifegain += 2;
+
     if (text.includes("return target creature card from your graveyard") || text.includes("reanimate")) {
       themeCounts.reanimator += 3;
     }
+
     if (
       text.includes("exile another target") ||
       text.includes("return it to the battlefield") ||
@@ -581,6 +621,7 @@ async function detectCommanderThemes(edhrecCards) {
     ) {
       themeCounts.blink += 3;
     }
+
     if (
       text.includes("equipped creature") ||
       text.includes("enchanted creature") ||
@@ -590,11 +631,15 @@ async function detectCommanderThemes(edhrecCards) {
     }
   }
 
-  return Object.entries(themeCounts)
+  const normalThemes = Object.entries(themeCounts)
     .sort((a, b) => b[1] - a[1])
     .filter(([, count]) => count > 1)
-    .slice(0, 5)
+    .slice(0, 4)
     .map(([theme]) => theme);
+
+  const tribalThemes = detectTribalThemes(topCards);
+
+  return [...normalThemes, ...tribalThemes].slice(0, 6);
 }
 
 function detectRole(card) {
@@ -645,6 +690,7 @@ function detectCardTags(card) {
   const tags = [];
   const text = card.text;
   const type = card.type;
+  const combined = `${type} ${text}`;
 
   if (text.includes("graveyard")) tags.push("graveyard");
   if (text.includes("token")) {
@@ -656,10 +702,12 @@ function detectCardTags(card) {
   if (text.includes("landfall") || text.includes("search your library for a land")) tags.push("lands");
   if (type.includes("instant") || type.includes("sorcery")) tags.push("spellslinger");
   if (text.includes("sacrifice")) tags.push("sacrifice");
+
   if (text.includes("+1/+1 counter") || text.includes("put a counter on") || text.includes("put counters on")) {
     tags.push("counters");
     tags.push("countersMatter");
   }
+
   if (text.includes("gain life") || text.includes("life total")) tags.push("lifegain");
   if (text.includes("return target creature card from your graveyard")) tags.push("reanimator");
 
@@ -694,6 +742,13 @@ function detectCardTags(card) {
     text.includes("return it to the battlefield")
   ) {
     tags.push("blink");
+  }
+
+  for (const tribalType of TRIBAL_TYPES) {
+    const pattern = new RegExp(`\\b${tribalType}\\b`);
+    if (pattern.test(combined)) {
+      tags.push(`${tribalType} tribal`);
+    }
   }
 
   return tags;
@@ -956,8 +1011,6 @@ function mergeDeckCounts(deck) {
     if (!map.has(key)) {
       map.set(key, {
         name: card.name,
-        role: card.role,
-        score: card.score || 0,
         count: 1
       });
     } else {
@@ -965,11 +1018,7 @@ function mergeDeckCounts(deck) {
     }
   }
 
-  return Array.from(map.values()).sort((a, b) => {
-    if (a.role === "land" && b.role !== "land") return 1;
-    if (a.role !== "land" && b.role === "land") return -1;
-    return a.name.localeCompare(b.name);
-  });
+  return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function displayThemes(themes) {
@@ -990,64 +1039,19 @@ function displayThemes(themes) {
   });
 }
 
-function displayDeck(deck) {
-  const ul = document.getElementById("deck");
-  ul.innerHTML = "";
-
-  if (!deck.length) {
-    return;
-  }
-
-  const merged = mergeDeckCounts(deck);
-
-  for (const item of merged) {
-    const li = document.createElement("li");
-
-    if (item.role === "land") {
-      li.textContent = `${item.count}x ${item.name} — ${item.role}`;
-    } else {
-      li.textContent = `${item.count}x ${item.name} — ${item.role} — score ${item.score.toFixed(2)}`;
-    }
-
-    ul.appendChild(li);
-  }
-}
-
 function displayDeckSummary(deck, commanderName, commanderColors) {
   const summary = document.getElementById("deckSummary");
 
-  const roleCounts = {
-    ramp: 0,
-    draw: 0,
-    removal: 0,
-    wipe: 0,
-    synergy: 0,
-    land: 0
-  };
-
-  const landBreakdown = {};
-
-  for (const card of deck) {
-    if (roleCounts[card.role] !== undefined) {
-      roleCounts[card.role] += 1;
-    }
-
-    if (card.role === "land") {
-      landBreakdown[card.name] = (landBreakdown[card.name] || 0) + 1;
-    }
-  }
-
+  const nonlands = deck.filter((c) => c.role !== "land").length;
+  const lands = deck.filter((c) => c.role === "land").length;
   const colorText = commanderColors.length ? commanderColors.join("") : "Colorless";
-  const landText = Object.entries(landBreakdown)
-    .map(([name, count]) => `${name}: ${count}`)
-    .join(", ");
 
   summary.textContent =
     `Commander: ${commanderName}
 Color Identity: ${colorText}
-Deck cards: ${deck.length}
-Ramp: ${roleCounts.ramp}, Draw: ${roleCounts.draw}, Removal: ${roleCounts.removal}, Wipes: ${roleCounts.wipe}, Synergy: ${roleCounts.synergy}, Lands: ${roleCounts.land}
-Mana base: ${landText}`;
+Total Cards: ${deck.length}
+Nonlands: ${nonlands}
+Lands: ${lands}`;
 }
 
 function displayCommanderCard(commanderData) {
@@ -1075,8 +1079,8 @@ function clearCommanderCard() {
 
 function generateMoxfieldExport(deck, commanderName) {
   const merged = mergeDeckCounts(deck);
-
   const lines = [`1 ${commanderName}`];
+
   for (const item of merged) {
     lines.push(`${item.count} ${item.name}`);
   }
@@ -1094,11 +1098,11 @@ async function copyMoxfieldExport() {
 
   try {
     await navigator.clipboard.writeText(box.value);
-    alert("Moxfield export copied.");
+    alert("Decklist copied.");
   } catch (error) {
     box.select();
     document.execCommand("copy");
-    alert("Moxfield export copied.");
+    alert("Decklist copied.");
   }
 }
 
@@ -1110,7 +1114,6 @@ async function generateDeck() {
   clearCommanderCard();
   updateProgress(0, "Starting...");
   displayThemes([]);
-  displayDeck([]);
   document.getElementById("deckSummary").textContent = "";
   document.getElementById("moxfieldExport").value = "";
 
@@ -1141,7 +1144,6 @@ async function generateDeck() {
     }
 
     displayCommanderCard(commanderData);
-
     logMessage(`Commander found: ${commanderData.name} | Color identity: ${commanderData.colors.join("") || "Colorless"}`);
 
     updateProgress(18, "Fetching EDHREC synergy data...");
@@ -1246,7 +1248,6 @@ async function generateDeck() {
     logMessage(`Built final deck with ${finalDeck.length} cards.`);
 
     updateProgress(97, "Rendering results...");
-    displayDeck(finalDeck);
     displayDeckSummary(finalDeck, commanderData.name, commanderData.colors);
     displayMoxfieldExport(finalDeck, commanderData.name);
 
