@@ -183,6 +183,27 @@ li {
   resize: vertical;
 }
 
+.commander-card-wrap {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.commander-image {
+  width: 265px;
+  max-width: 100%;
+  border-radius: 16px;
+  border: 1px solid #374151;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.commander-meta {
+  color: #cbd5e1;
+  white-space: pre-line;
+  min-width: 220px;
+}
+
 @media (max-width: 900px) {
   .results-grid {
     grid-template-columns: 1fr;
