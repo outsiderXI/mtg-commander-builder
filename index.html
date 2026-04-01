@@ -1,45 +1,61 @@
 <!DOCTYPE html>
-<html>
-
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Commander Deck Builder</title>
-<link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MTG Commander Deck Builder</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
-
 <body>
+  <div class="app">
+    <h1>MTG Commander Deck Builder</h1>
 
-<h1>MTG Commander Deck Builder</h1>
+    <div class="panel">
+      <label for="commanderInput">Commander Name</label>
+      <div class="autocomplete-wrap">
+        <input
+          id="commanderInput"
+          type="text"
+          placeholder="Start typing a commander name..."
+          autocomplete="off"
+        />
+        <div id="autocompleteList" class="autocomplete-list hidden"></div>
+      </div>
 
-<label>Commander Name</label>
-<br>
-<input id="commanderInput" type="text" placeholder="Muldrotha, the Gravetide">
+      <label for="csvFile">Upload ManaBox CSV</label>
+      <input id="csvFile" type="file" accept=".csv" />
 
-<br><br>
+      <button id="generateBtn">Generate Deck</button>
+    </div>
 
-<label>Upload ManaBox CSV</label>
-<br>
-<input id="csvFile" type="file" accept=".csv">
+    <div class="panel">
+      <h2>Progress</h2>
+      <div id="progressContainer">
+        <div id="progressBar"></div>
+      </div>
+      <div id="statusText">Idle</div>
+      <div id="subStatusText" class="sub-status"></div>
 
-<br><br>
+      <div class="log-wrap">
+        <div class="log-header">Activity Log</div>
+        <div id="activityLog" class="activity-log"></div>
+      </div>
+    </div>
 
-<button onclick="generateDeck()">Generate Deck</button>
+    <div class="results-grid">
+      <div class="panel">
+        <h2>Detected Themes</h2>
+        <ul id="themes"></ul>
+      </div>
 
-<br><br>
+      <div class="panel">
+        <h2>Generated Deck</h2>
+        <div id="deckSummary" class="deck-summary"></div>
+        <ul id="deck"></ul>
+      </div>
+    </div>
+  </div>
 
-<div id="progressContainer">
-    <div id="progressBar"></div>
-</div>
-
-<p id="statusText">Idle</p>
-
-<h2>Detected Themes</h2>
-<ul id="themes"></ul>
-
-<h2>Decklist</h2>
-<ul id="deck"></ul>
-
-<script src="script.js"></script>
-
+  <script src="script.js"></script>
 </body>
 </html>
