@@ -47,6 +47,48 @@ const TRIBAL_TYPES = [
   "wizard", "wolf", "zombie"
 ];
 
+/*
+  Maintained snapshot for Game Changers detection.
+  Update this array as the official list changes.
+*/
+const GAME_CHANGERS = new Set([
+  "ad nauseam",
+  "armageddon",
+  "back to basics",
+  "biorhythm",
+  "chrome mox",
+  "cyclonic rift",
+  "demonic tutor",
+  "drannith magistrate",
+  "expropriate",
+  "farewell",
+  "fierce guardianship",
+  "force of will",
+  "force of negation",
+  "gaea's cradle",
+  "gamble",
+  "grim monolith",
+  "imperial seal",
+  "jeweled lotus",
+  "mana crypt",
+  "mana drain",
+  "mana vault",
+  "mystical tutor",
+  "narset, parter of veils",
+  "opposition agent",
+  "rhystic study",
+  "smothering tithe",
+  "sol ring",
+  "survival of the fittest",
+  "sylvan library",
+  "teferi's protection",
+  "thassa's oracle",
+  "underworld breach",
+  "vampiric tutor",
+  "winter orb",
+  "worldly tutor"
+]);
+
 generateBtn.addEventListener("click", generateDeck);
 copyExportBtn.addEventListener("click", copyMoxfieldExport);
 commanderInput.addEventListener("input", onCommanderInput);
@@ -979,10 +1021,6 @@ function recommendLandCount(commanderColors) {
   return 38;
 }
 
-function landEntersTappedPenalty(card) {
-  return card.text.includes("enters tapped") ? 1.5 : 0;
-}
-
 function evaluateNonbasicLand(card, commanderColors, strategyProfile) {
   if (!card.type.includes("land")) return null;
   if (isBasicLand(card.name)) return null;
@@ -993,44 +1031,32 @@ function evaluateNonbasicLand(card, commanderColors, strategyProfile) {
   const text = card.text;
 
   let score = 0;
-
-  // Base value: how many relevant colors it actually makes
   score += relevantProduced.length * 4;
 
-  // Strong universal lands
   if (normalizedName === "command tower") score += 10;
   if (normalizedName === "exotic orchard") score += 7;
   if (normalizedName === "path of ancestry" && strategyProfile.wantsTribal) score += 9;
   if (normalizedName === "secluded courtyard" && strategyProfile.wantsTribal) score += 8;
   if (normalizedName === "unclaimed territory" && strategyProfile.wantsTribal) score += 8;
 
-  // Tri-lands / triomes / pathways / strong dual patterns
   if (card.name.toLowerCase().includes("triome")) score += 8;
   if (card.name.toLowerCase().includes("pathway")) score += 6;
 
-  // Good text boxes
   if (text.includes("add one mana of any color")) score += 6;
   if (text.includes("add one mana of any type")) score += 5;
 
-  // Land synergy
   if (strategyProfile.wantsTokens && text.includes("create") && text.includes("token")) score += 5;
   if (strategyProfile.wantsSacrifice && text.includes("sacrifice")) score += 4;
   if (strategyProfile.wantsGoWide && text.includes("creature")) score += 2;
 
-  // Penalties
   if (text.includes("enters tapped")) score -= 4;
   if (text.includes("unless you control")) score -= 1;
   if (text.includes("pay 1 life")) score -= 0.5;
   if (relevantProduced.length === 0) score -= 20;
 
-  // In mono-color decks, nonbasics should need a real reason
   if (strategyProfile.monoColor) {
-    if (!isSynergisticMonoColorLand(card, commanderColors, strategyProfile)) {
-      score -= 12;
-    }
-    if (isLowPriorityMonoColorFixer(card, commanderColors)) {
-      score -= 12;
-    }
+    if (!isSynergisticMonoColorLand(card, commanderColors, strategyProfile)) score -= 12;
+    if (isLowPriorityMonoColorFixer(card, commanderColors)) score -= 12;
   }
 
   return {
@@ -1060,13 +1086,11 @@ function buildNonbasicManaBase(collectionData, allOwnedCardData, commanderColors
 
     const landCandidate = evaluateNonbasicLand(card, commanderColors, strategyProfile);
     if (!landCandidate) continue;
-
     landPool.push(landCandidate);
   }
 
   landPool.sort((a, b) => b.score - a.score);
 
-  // Only lands above this threshold beat basics often enough
   const threshold =
     commanderColors.length === 1 ? 7 :
     commanderColors.length === 2 ? 6 :
@@ -1075,7 +1099,6 @@ function buildNonbasicManaBase(collectionData, allOwnedCardData, commanderColors
 
   const filtered = landPool.filter((land) => land.score >= threshold);
 
-  // Keep some basics even in multicolor decks
   const maxNonbasicCount =
     commanderColors.length === 1 ? Math.min(6, targetLandCount) :
     commanderColors.length === 2 ? Math.min(12, targetLandCount) :
@@ -1304,7 +1327,7 @@ function buildDeckFromScoredPool(
   const basicLands = buildBasicManaBase(
     commanderColors,
     remainingLandCount,
-    selectedNonbasicLands
+    selectedNonbasics = selectedNonbasicLands
   );
 
   let finalDeck = [...deck, ...selectedNonbasicLands, ...basicLands];
@@ -1373,6 +1396,194 @@ Total Cards: ${deck.length}
 Creatures: ${creatures}
 Nonlands: ${nonlands}
 Lands: ${lands}`;
+}
+
+function getBracketLabel(bracket) {
+  const labels = {
+    1: "Bracket 1 — Exhibition",
+    2: "Bracket 2 — Core",
+    3: "Bracket 3 — Upgraded",
+    4: "Bracket 4 — Optimized",
+    5: "Bracket 5 — cEDH"
+  };
+  return labels[bracket] || "Unknown";
+}
+
+function detectGameChangers(deck, commanderName) {
+  const detected = [];
+  const seen = new Set();
+
+  const allNames = [commanderName, ...deck.map((c) => c.name)];
+  for (const name of allNames) {
+    const normalized = normalizeCardName(name);
+    if (GAME_CHANGERS.has(normalized) && !seen.has(normalized)) {
+      detected.push(name);
+      seen.add(normalized);
+    }
+  }
+
+  return detected.sort((a, b) => a.localeCompare(b));
+}
+
+function estimateDeckBracket(deck, commanderThemes, commanderColors, commanderName) {
+  const names = deck.map((c) => normalizeCardName(c.name));
+  const nonlands = deck.filter((c) => c.role !== "land");
+  const lands = deck.filter((c) => c.role === "land");
+  const creatures = nonlands.filter((c) => c.type.includes("creature")).length;
+
+  const rampCount = nonlands.filter((c) => c.role === "ramp").length;
+  const drawCount = nonlands.filter((c) => c.role === "draw").length;
+  const removalCount = nonlands.filter((c) => c.role === "removal").length;
+  const wipeCount = nonlands.filter((c) => c.role === "wipe").length;
+
+  const avgCmc =
+    nonlands.length > 0
+      ? nonlands.reduce((sum, c) => sum + (c.cmc || 0), 0) / nonlands.length
+      : 0;
+
+  const fastManaCards = [
+    "sol ring",
+    "mana crypt",
+    "chrome mox",
+    "mox diamond",
+    "jeweled lotus",
+    "mana vault",
+    "grim monolith",
+    "lotus petal"
+  ];
+
+  const tutorCards = [
+    "demonic tutor",
+    "vampiric tutor",
+    "imperial seal",
+    "worldly tutor",
+    "enlightened tutor",
+    "mystical tutor",
+    "gamble",
+    "diabolic intent",
+    "eladamri's call",
+    "green sun's zenith",
+    "finale of devastation",
+    "crop rotation"
+  ];
+
+  const extraTurnCards = [
+    "time warp",
+    "temporal manipulation",
+    "capture of jingzhou",
+    "nexus of fate",
+    "time stretch",
+    "expropriate"
+  ];
+
+  const massLandDenialCards = [
+    "armageddon",
+    "ravages of war",
+    "ruination",
+    "winter orb",
+    "blood moon",
+    "magus of the moon",
+    "sunder"
+  ];
+
+  const compactComboCards = [
+    "thassa's oracle",
+    "underworld breach",
+    "ad nauseam",
+    "protean hulk",
+    "bolas's citadel",
+    "dockside extortionist",
+    "food chain"
+  ];
+
+  const fastManaCount = names.filter((n) => fastManaCards.includes(n)).length;
+  const tutorCount = names.filter((n) => tutorCards.includes(n)).length;
+  const extraTurnCount = names.filter((n) => extraTurnCards.includes(n)).length;
+  const massLandDenialCount = names.filter((n) => massLandDenialCards.includes(n)).length;
+  const compactComboCount = names.filter((n) => compactComboCards.includes(n)).length;
+  const gameChangers = detectGameChangers(deck, commanderName);
+  const gameChangerCount = gameChangers.length;
+
+  let score = 0;
+
+  score += rampCount * 0.25;
+  score += drawCount * 0.2;
+  score += removalCount * 0.15;
+  score += wipeCount * 0.2;
+
+  if (avgCmc <= 2.2) score += 2.5;
+  else if (avgCmc <= 2.8) score += 1.5;
+  else if (avgCmc <= 3.3) score += 0.5;
+
+  score += fastManaCount * 2.5;
+  score += tutorCount * 1.75;
+  score += extraTurnCount * 1.5;
+  score += massLandDenialCount * 2;
+  score += compactComboCount * 2.5;
+  score += gameChangerCount * 1.2;
+
+  if (commanderThemes.includes("tokens")) score += 0.4;
+  if (commanderThemes.includes("sacrifice")) score += 0.4;
+  if (commanderThemes.includes("cantrips")) score += 0.6;
+  if (commanderThemes.includes("counters")) score += 0.3;
+  if (commanderThemes.some((t) => t.endsWith(" tribal"))) score += 0.3;
+
+  if (commanderColors.length >= 3) score += 0.3;
+  if (creatures >= 24) score -= 0.3;
+  if (lands >= 37) score -= 0.2;
+
+  let bracket = 2;
+
+  if (score < 1.5) bracket = 1;
+  else if (score < 4.5) bracket = 2;
+  else if (score < 8.5) bracket = 3;
+  else if (score < 13) bracket = 4;
+  else bracket = 5;
+
+  // Apply official Game Changer floor logic.
+  if (gameChangerCount === 0 && bracket < 2) bracket = 1;
+  if (gameChangerCount === 0 && bracket === 1) bracket = 1;
+  if (gameChangerCount > 0 && bracket < 3) bracket = 3;
+  if (gameChangerCount > 3 && bracket < 4) bracket = 4;
+
+  const reasons = [];
+
+  if (gameChangerCount) reasons.push(`game changers: ${gameChangerCount}`);
+  if (fastManaCount) reasons.push(`fast mana: ${fastManaCount}`);
+  if (tutorCount) reasons.push(`tutors: ${tutorCount}`);
+  if (compactComboCount) reasons.push(`combo pieces: ${compactComboCount}`);
+  if (extraTurnCount) reasons.push(`extra turns: ${extraTurnCount}`);
+  if (massLandDenialCount) reasons.push(`mass land denial: ${massLandDenialCount}`);
+  reasons.push(`avg CMC: ${avgCmc.toFixed(2)}`);
+  reasons.push(`ramp/draw/removal/wipes: ${rampCount}/${drawCount}/${removalCount}/${wipeCount}`);
+
+  return {
+    bracket,
+    label: getBracketLabel(bracket),
+    score: Number(score.toFixed(2)),
+    reasons,
+    gameChangers
+  };
+}
+
+function displayDeckBracket(bracketInfo) {
+  const el = document.getElementById("deckBracket");
+  el.textContent =
+    `Estimated Power: ${bracketInfo.label}\n` +
+    `Heuristic score: ${bracketInfo.score}\n` +
+    `Signals: ${bracketInfo.reasons.join(", ")}`;
+}
+
+function displayGameChangers(bracketInfo) {
+  const el = document.getElementById("deckGameChangers");
+  if (!bracketInfo.gameChangers.length) {
+    el.textContent = "Game Changers detected: none";
+    return;
+  }
+
+  el.textContent =
+    `Game Changers detected (${bracketInfo.gameChangers.length}): ` +
+    bracketInfo.gameChangers.join(", ");
 }
 
 function renderColorPips(colors) {
@@ -1498,6 +1709,8 @@ async function generateDeck() {
   updateProgress(0, "Starting...");
   displayThemes([]);
   document.getElementById("deckSummary").textContent = "";
+  document.getElementById("deckBracket").textContent = "";
+  document.getElementById("deckGameChangers").textContent = "";
   document.getElementById("moxfieldExport").value = "";
   document.getElementById("exportPreview").innerHTML = "";
 
@@ -1639,6 +1852,16 @@ async function generateDeck() {
     updateProgress(97, "Rendering results...");
     displayDeckSummary(finalDeck, commanderData.name, commanderData.colors);
     displayMoxfieldExport(finalDeck, commanderData.name);
+
+    const bracketInfo = estimateDeckBracket(
+      finalDeck,
+      commanderThemes,
+      commanderData.colors,
+      commanderData.name
+    );
+    displayDeckBracket(bracketInfo);
+    displayGameChangers(bracketInfo);
+    logMessage(`Estimated ${bracketInfo.label} (score ${bracketInfo.score}).`);
 
     updateProgress(100, "Deck complete!", `${finalDeck.length} cards selected`);
     logMessage("Finished.");
