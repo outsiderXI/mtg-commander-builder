@@ -111,9 +111,6 @@ copyExportBtn.addEventListener("click", copyMoxfieldExport);
 commanderInput.addEventListener("input", onCommanderInput);
 commanderInput.addEventListener("keydown", onAutocompleteKeydown);
 
-document.querySelectorAll(".priority-btn").forEach((btn) => {
-  btn.addEventListener("click", () => regenerateWithMode(btn.dataset.mode));
-});
 
 document.addEventListener("click", (event) => {
   if (!autocompleteList.contains(event.target) && event.target !== commanderInput) {
@@ -121,10 +118,62 @@ document.addEventListener("click", (event) => {
   }
 });
 
+const priorityButtonsWrap = document.getElementById("priorityButtons");
+if (priorityButtonsWrap) {
+  priorityButtonsWrap.addEventListener("click", (event) => {
+    const button = event.target.closest(".priority-btn");
+    if (!button) return;
+    regenerateWithMode(button.dataset.mode);
+  });
+}
+
 function updatePriorityButtons() {
   document.querySelectorAll(".priority-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.mode === currentBuildMode);
   });
+}
+
+function renderPriorityButtons(commanderThemes = []) {
+  const wrap = document.getElementById("priorityButtons");
+  if (!wrap) return;
+
+  const uniqueThemes = Array.from(new Set((commanderThemes || []).filter(Boolean))).slice(0, 5);
+  const sections = [
+    {
+      title: "Build Style",
+      buttons: [
+        { mode: "balanced", label: "Balanced" },
+        { mode: "fewer-staples", label: "Fewer Staples" }
+      ]
+    },
+    {
+      title: "Detected Themes",
+      buttons: uniqueThemes.map((theme) => ({
+        mode: `theme:${theme}`,
+        label: formatThemeLabel(theme)
+      }))
+    },
+    {
+      title: "Bracket Target",
+      buttons: [1, 2, 3, 4, 5].map((bracket) => ({
+        mode: `bracket:${bracket}`,
+        label: `Bracket ${bracket}`
+      }))
+    }
+  ].filter((section) => section.buttons.length);
+
+  wrap.innerHTML = sections.map((section) => `
+    <div class="priority-section">
+      <div class="priority-section-label">${escapeHtml(section.title)}</div>
+      <div class="priority-section-buttons">
+        ${section.buttons.map((btn) => `
+          <button class="priority-btn" data-mode="${escapeHtml(btn.mode)}" type="button">${escapeHtml(btn.label)}</button>
+        `).join("")}
+      </div>
+    </div>
+  `).join("");
+
+  updatePriorityButtons();
 }
 
 function updateProgress(percent, statusText, subStatus = "") {
@@ -1454,25 +1503,34 @@ function getCommanderStrategyProfile(commanderName, commanderThemes, commanderCo
 }
 
 function getModePreferences(mode, strategyProfile) {
+  const themeFocus = mode.startsWith("theme:") ? mode.slice(6) : "";
+  const bracketTarget = mode.startsWith("bracket:") ? Number(mode.slice(8)) : null;
+  const lowerBracket = bracketTarget && bracketTarget <= 2;
+  const higherBracket = bracketTarget && bracketTarget >= 4;
+  const focusedThemeSignal = normalizeThemeName(themeFocus);
+  const tribalFocus = getCommanderTribalThemes(themeFocus ? [themeFocus] : []).length > 0;
+  const creatureFocusedTheme = ["tokens", "blink", "reanimator", "elves", "zombies", "goblins", "humans", "angels", "dragons", "bears"].includes(focusedThemeSignal);
+
   return {
     mode,
+    themeFocus,
+    focusedThemeSignal,
+    bracketTarget,
     synergyBias:
-      mode === "more-synergistic" ? 1.4 :
-      mode === "more-tribal" ? 1.25 :
-      mode === "balanced" ? 1 :
-      mode === "more-casual" ? 0.9 :
+      themeFocus ? 1.35 :
+      higherBracket ? 1.3 :
+      lowerBracket ? 0.92 :
       1,
     creatureBias:
-      mode === "more-creatures" ? 1.6 :
-      mode === "more-tribal" ? 1.35 :
+      tribalFocus || creatureFocusedTheme ? 1.3 :
       strategyProfile.wantsCreatures ? 1.1 : 1,
-    casualBias: mode === "more-casual" ? 1.4 : 1,
-    manaBaseBias: mode === "stronger-mana-base" ? 1.35 : 1,
-    fewerStaplesBias: mode === "fewer-staples" ? 1.5 : 1,
-    tribalBias: mode === "more-tribal" ? 1.5 : 1,
+    casualBias: lowerBracket ? 1.45 : 1,
+    manaBaseBias: higherBracket ? 1.2 : 1,
+    fewerStaplesBias: mode === "fewer-staples" || lowerBracket ? 1.5 : 1,
+    tribalBias: tribalFocus ? 1.55 : 1,
     minimumCreatureBonus:
-      mode === "more-creatures" ? 8 :
-      mode === "more-tribal" ? 6 :
+      tribalFocus ? 6 :
+      creatureFocusedTheme ? 4 :
       0
   };
 }
@@ -2510,13 +2568,7 @@ function displayCommanderCard(commanderData) {
     commanderImageSkeleton.classList.add("hidden");
   }
 
-  const colorText = commanderData.colors.length ? commanderData.colors.join("") : "Colorless";
-  commanderMeta.textContent =
-    `Name: ${commanderData.name}
-Mana Cost: ${commanderData.manaCost || "-"}
-Type: ${commanderData.rawType || "-"}
-Color Identity: ${colorText}`;
-
+  commanderMeta.textContent = "";
   renderColorPips(commanderData.colors);
 }
 
@@ -2734,6 +2786,8 @@ async function generateDeck() {
       commanderData.colors
     );
     displayThemes(commanderThemes);
+    currentBuildMode = "balanced";
+    renderPriorityButtons(commanderThemes);
     logMessage(`Detected themes: ${commanderThemes.join(", ") || "none"}`);
 
     updateProgress(58, "Matching your collection...");
