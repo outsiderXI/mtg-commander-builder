@@ -14,6 +14,7 @@ const commanderMeta = document.getElementById("commanderMeta");
 const commanderImageSkeleton = document.getElementById("commanderImageSkeleton");
 const colorPips = document.getElementById("colorPips");
 const toast = document.getElementById("toast");
+const deckStats = document.getElementById("deckStats");
 
 const cardCache = new Map();
 
@@ -133,18 +134,11 @@ function updateProgress(percent, statusText, subStatus = "") {
 }
 
 function clearLog() {
-  document.getElementById("activityLog").innerHTML = "";
+  return;
 }
 
 function logMessage(message) {
-  const log = document.getElementById("activityLog");
-  const line = document.createElement("div");
-  const now = new Date();
-  const timestamp = now.toLocaleTimeString();
-  line.className = "log-line";
-  line.textContent = `[${timestamp}] ${message}`;
-  log.appendChild(line);
-  log.scrollTop = log.scrollHeight;
+  return;
 }
 
 function showToast(message) {
@@ -164,6 +158,201 @@ function sleep(ms) {
 
 function normalizeCardName(name) {
   return String(name || "").trim().toLowerCase();
+}
+
+function formatThemeLabel(theme) {
+  if (!theme) return "";
+  return String(theme)
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function renderLoadingState() {
+  const preview = document.getElementById("exportPreview");
+
+  if (deckStats) {
+    deckStats.innerHTML = `
+      <div class="stat-skeleton-row">
+        <div class="skeleton skeleton-title"></div>
+        <div class="skeleton skeleton-pill"></div>
+      </div>
+      <div class="stat-grid">
+        <div class="skeleton skeleton-stat"></div>
+        <div class="skeleton skeleton-stat"></div>
+        <div class="skeleton skeleton-stat"></div>
+        <div class="skeleton skeleton-stat"></div>
+      </div>
+    `;
+  }
+
+  if (preview) {
+    preview.innerHTML = `
+      <div class="preview-section fade-up">
+        <div class="skeleton skeleton-section-title"></div>
+        <div class="skeleton skeleton-line"></div>
+        <div class="skeleton skeleton-line"></div>
+        <div class="skeleton skeleton-line short"></div>
+      </div>
+      <div class="preview-section fade-up">
+        <div class="skeleton skeleton-section-title"></div>
+        <div class="skeleton skeleton-line"></div>
+        <div class="skeleton skeleton-line"></div>
+        <div class="skeleton skeleton-line short"></div>
+      </div>
+    `;
+  }
+}
+
+function renderPreviewEmptyState(message = "Build a deck to see the grouped preview.") {
+  const preview = document.getElementById("exportPreview");
+  if (!preview) return;
+  preview.innerHTML = `
+    <div class="empty-state-card fade-up">
+      <div class="empty-state-icon">🃏</div>
+      <div class="empty-state-title">Nothing to preview yet</div>
+      <div class="empty-state-copy">${escapeHtml(message)}</div>
+    </div>
+  `;
+}
+
+function renderPreviewErrorState(message = "Something went wrong while preparing the preview.") {
+  const preview = document.getElementById("exportPreview");
+  if (!preview) return;
+  preview.innerHTML = `
+    <div class="error-state-card fade-up">
+      <div class="empty-state-icon">⚠️</div>
+      <div class="empty-state-title">Preview failed</div>
+      <div class="empty-state-copy">${escapeHtml(message)}</div>
+    </div>
+  `;
+}
+
+function countByType(deck) {
+  const counts = {
+    Land: 0,
+    Creature: 0,
+    Instant: 0,
+    Sorcery: 0,
+    Artifact: 0,
+    Enchantment: 0,
+    Planeswalker: 0,
+    Other: 0
+  };
+
+  for (const card of deck || []) {
+    const typeLine = String(card.type || card.type_line || "");
+    if (typeLine.includes("land")) counts.Land += 1;
+    else if (typeLine.includes("creature")) counts.Creature += 1;
+    else if (typeLine.includes("instant")) counts.Instant += 1;
+    else if (typeLine.includes("sorcery")) counts.Sorcery += 1;
+    else if (typeLine.includes("artifact")) counts.Artifact += 1;
+    else if (typeLine.includes("enchantment")) counts.Enchantment += 1;
+    else if (typeLine.includes("planeswalker")) counts.Planeswalker += 1;
+    else counts.Other += 1;
+  }
+
+  return counts;
+}
+
+function averageManaValue(deck) {
+  const spells = (deck || []).filter((card) => !String(card.type || card.type_line || "").includes("land"));
+  if (!spells.length) return "0.00";
+  const total = spells.reduce((sum, card) => sum + (Number(card.cmc) || Number(card.mana_value) || 0), 0);
+  return (total / spells.length).toFixed(2);
+}
+
+function renderDeckStats(deck, commanderName, bracketInfo) {
+  if (!deckStats) return;
+
+  const typeCounts = countByType(deck);
+  const total = deck?.length || 0;
+
+  deckStats.innerHTML = `
+    <div class="stat-panel-header fade-up">
+      <div>
+        <div class="eyebrow">Deck Snapshot</div>
+        <div class="stat-panel-title">${escapeHtml(commanderName || "Commander Deck")}</div>
+      </div>
+      <div class="mini-badge">Bracket ${escapeHtml(String(bracketInfo?.bracket ?? "-"))}</div>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-card fade-up"><div class="stat-label">Cards</div><div class="stat-value">${total}</div></div>
+      <div class="stat-card fade-up"><div class="stat-label">Lands</div><div class="stat-value">${typeCounts.Land}</div></div>
+      <div class="stat-card fade-up"><div class="stat-label">Creatures</div><div class="stat-value">${typeCounts.Creature}</div></div>
+      <div class="stat-card fade-up"><div class="stat-label">Avg MV</div><div class="stat-value">${averageManaValue(deck)}</div></div>
+    </div>
+  `;
+}
+
+let manaCurveChartInstance = null;
+let typeBreakdownChartInstance = null;
+
+function renderManaCurve(deck) {
+  const canvas = document.getElementById("manaCurveChart");
+  if (!canvas || typeof Chart === "undefined") return;
+
+  const buckets = [0, 0, 0, 0, 0, 0, 0, 0];
+  for (const card of deck || []) {
+    const typeLine = String(card.type || card.type_line || "");
+    if (typeLine.includes("land")) continue;
+    const mv = Number(card.cmc) || Number(card.mana_value) || 0;
+    const index = Math.min(Math.floor(mv), 7);
+    buckets[index] += 1;
+  }
+
+  if (manaCurveChartInstance) manaCurveChartInstance.destroy();
+
+  manaCurveChartInstance = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: ["0", "1", "2", "3", "4", "5", "6", "7+"],
+      datasets: [{ label: "Cards", data: buckets, borderRadius: 8 }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 650 },
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: "#cbd5e1" }, grid: { color: "rgba(255,255,255,0.05)" } },
+        y: { beginAtZero: true, ticks: { precision: 0, color: "#cbd5e1" }, grid: { color: "rgba(255,255,255,0.05)" } }
+      }
+    }
+  });
+}
+
+function renderTypeBreakdown(deck) {
+  const canvas = document.getElementById("typeBreakdownChart");
+  if (!canvas || typeof Chart === "undefined") return;
+
+  const counts = countByType(deck);
+  const labels = Object.keys(counts).filter((key) => counts[key] > 0);
+  const data = labels.map((key) => counts[key]);
+
+  if (typeBreakdownChartInstance) typeBreakdownChartInstance.destroy();
+
+  typeBreakdownChartInstance = new Chart(canvas, {
+    type: "doughnut",
+    data: {
+      labels,
+      datasets: [{ data }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 650 },
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: { boxWidth: 12, color: "#cbd5e1" }
+        }
+      },
+      cutout: "62%"
+    }
+  });
 }
 
 function splitCsvLine(line) {
@@ -1488,8 +1677,8 @@ function displayThemeChips(themes) {
 
   if (!themes.length) {
     const chip = document.createElement("div");
-    chip.className = "theme-chip";
-    chip.textContent = "No clear themes";
+    chip.className = "theme-chip theme-chip-muted";
+    chip.textContent = "No Clear Themes";
     wrap.appendChild(chip);
     return;
   }
@@ -1497,7 +1686,7 @@ function displayThemeChips(themes) {
   themes.forEach((theme) => {
     const chip = document.createElement("div");
     chip.className = "theme-chip";
-    chip.textContent = theme;
+    chip.textContent = formatThemeLabel(theme);
     wrap.appendChild(chip);
   });
 }
@@ -1661,22 +1850,35 @@ function displayDeckBracket(bracketInfo) {
     bracketInfo.bracket === 4 ? "badge-b4" :
     "badge-b5";
 
-  el.innerHTML =
-    `Estimated Power: <span class="badge ${badgeClass}">${escapeHtml(bracketInfo.label)}</span>\n` +
-    `Heuristic score: ${bracketInfo.score}\n` +
-    `Signals: ${escapeHtml(bracketInfo.reasons.join(", "))}`;
+  el.innerHTML = `
+    <div class="power-card fade-up">
+      <div class="power-card-copy">
+        <div class="power-card-label">Deck Bracket</div>
+        <div class="power-card-subtitle">A quick strength estimate based on your final list.</div>
+      </div>
+      <div class="badge ${badgeClass}">${escapeHtml(bracketInfo.label)}</div>
+    </div>
+  `;
 }
 
 function displayGameChangers(bracketInfo) {
   const el = document.getElementById("deckGameChangers");
   if (!bracketInfo.gameChangers.length) {
-    el.textContent = "Game Changers detected: none";
+    el.innerHTML = `
+      <div class="info-card fade-up">
+        <div class="info-card-title">Game Changers</div>
+        <div class="info-card-copy">None detected in this build.</div>
+      </div>
+    `;
     return;
   }
 
-  el.textContent =
-    `Game Changers detected (${bracketInfo.gameChangers.length}): ` +
-    bracketInfo.gameChangers.join(", ");
+  el.innerHTML = `
+    <div class="info-card fade-up">
+      <div class="info-card-title">Game Changers (${bracketInfo.gameChangers.length})</div>
+      <div class="info-card-copy">${escapeHtml(bracketInfo.gameChangers.join(", "))}</div>
+    </div>
+  `;
 }
 
 function displayBuildBreakdown(deck) {
@@ -1688,13 +1890,18 @@ function displayBuildBreakdown(deck) {
   const nonbasicCount = deck.filter((c) => c.source === "nonbasic-land").length;
   const basicCount = deck.filter((c) => c.source === "basic-land").length;
 
-  el.textContent =
-    `Build Breakdown
-EDHREC matches used: ${edhrecCount}
-Fallback creatures used: ${fallbackCreatureCount}
-Other fallback cards used: ${fallbackCount}
-Nonbasic lands used: ${nonbasicCount}
-Basic lands used: ${basicCount}`;
+  el.innerHTML = `
+    <div class="info-card fade-up">
+      <div class="info-card-title">Build Breakdown</div>
+      <div class="build-breakdown-grid">
+        <div class="build-breakdown-item"><span>EDHREC Matches</span><strong>${edhrecCount}</strong></div>
+        <div class="build-breakdown-item"><span>Fallback Creatures</span><strong>${fallbackCreatureCount}</strong></div>
+        <div class="build-breakdown-item"><span>Other Fallbacks</span><strong>${fallbackCount}</strong></div>
+        <div class="build-breakdown-item"><span>Nonbasic Lands</span><strong>${nonbasicCount}</strong></div>
+        <div class="build-breakdown-item"><span>Basic Lands</span><strong>${basicCount}</strong></div>
+      </div>
+    </div>
+  `;
 }
 
 function generateWarnings(deck, commanderThemes, bracketInfo) {
@@ -1729,23 +1936,31 @@ function displayWarnings(warnings) {
   const el = document.getElementById("warningsPanel");
   el.innerHTML = "";
 
+  const title = document.createElement("div");
+  title.className = "info-card-title";
+  title.textContent = "Warnings / Confidence Notes";
+
+  const card = document.createElement("div");
+  card.className = "info-card fade-up";
+  card.appendChild(title);
+
   if (!warnings.length) {
-    el.textContent = "Warnings / Confidence Notes\nNo major structural issues detected.";
+    const copy = document.createElement("div");
+    copy.className = "info-card-copy";
+    copy.textContent = "No major structural issues detected.";
+    card.appendChild(copy);
+    el.appendChild(card);
     return;
   }
-
-  const title = document.createElement("div");
-  title.textContent = "Warnings / Confidence Notes";
-  title.style.fontWeight = "700";
-  title.style.marginBottom = "8px";
-  el.appendChild(title);
 
   warnings.forEach((warning) => {
     const line = document.createElement("div");
     line.className = "warning-line";
     line.textContent = `• ${warning}`;
-    el.appendChild(line);
+    card.appendChild(line);
   });
+
+  el.appendChild(card);
 }
 
 function renderColorPips(colors) {
@@ -1817,8 +2032,13 @@ function displayExportPreview(deck, commanderName, commanderThemes, strategyProf
   const preview = document.getElementById("exportPreview");
   preview.innerHTML = "";
 
+  if (!deck?.length) {
+    renderPreviewEmptyState();
+    return;
+  }
+
   const commanderSection = document.createElement("div");
-  commanderSection.className = "preview-section";
+  commanderSection.className = "preview-section fade-up";
   commanderSection.innerHTML = `<div class="preview-section-title">Commander</div>`;
   const commanderLine = document.createElement("div");
   commanderLine.className = "preview-line";
@@ -1836,25 +2056,30 @@ function displayExportPreview(deck, commanderName, commanderThemes, strategyProf
   }
 
   const sectionOrder = ["Creatures", "Artifacts", "Enchantments", "Planeswalkers", "Instants", "Sorceries", "Lands", "Other"];
+  let renderedSections = 0;
 
   for (const sectionName of sectionOrder) {
     const items = sections.get(sectionName);
     if (!items || !items.length) continue;
 
+    renderedSections += 1;
     const section = document.createElement("div");
-    section.className = "preview-section";
-    section.innerHTML = `<div class="preview-section-title">${escapeHtml(sectionName)}</div>`;
+    section.className = "preview-section fade-up";
+    section.innerHTML = `<div class="preview-section-title">${escapeHtml(sectionName)} <span class="preview-count">${items.reduce((sum, item) => sum + item.count, 0)}</span></div>`;
 
     items.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "preview-row";
+
       const line = document.createElement("div");
       line.className = "preview-line";
       line.innerHTML = `<span class="preview-qty">${item.count}</span> <a href="${scryfallCardUrl(item.name)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.name)}</a>`;
-      section.appendChild(line);
+      row.appendChild(line);
 
       const sourceCard = deck.find((c) => normalizeCardName(c.name) === normalizeCardName(item.name));
       const reasons = sourceCard
-        ? generateCardReasons(sourceCard, commanderThemes, strategyProfile, commanderColors)
-        : (item.reasons || []);
+        ? generateCardReasons(sourceCard, commanderThemes, strategyProfile, commanderColors).map(formatThemeLabel)
+        : (item.reasons || []).map(formatThemeLabel);
 
       if (reasons.length) {
         const badges = document.createElement("div");
@@ -1865,11 +2090,17 @@ function displayExportPreview(deck, commanderName, commanderThemes, strategyProf
           badge.textContent = reason;
           badges.appendChild(badge);
         });
-        section.appendChild(badges);
+        row.appendChild(badges);
       }
+
+      section.appendChild(row);
     });
 
     preview.appendChild(section);
+  }
+
+  if (renderedSections === 0) {
+    renderPreviewErrorState("The deck preview did not contain any grouped cards.");
   }
 }
 
@@ -1909,15 +2140,16 @@ async function generateDeck() {
   clearCommanderCard();
   updateProgress(0, "Starting...");
   displayThemes([]);
+  renderLoadingState();
   document.getElementById("deckSummary").textContent = "";
   document.getElementById("deckBracket").textContent = "";
   document.getElementById("deckGameChangers").textContent = "";
   document.getElementById("buildBreakdown").textContent = "";
   document.getElementById("warningsPanel").textContent = "";
   document.getElementById("moxfieldExport").value = "";
-  document.getElementById("exportPreview").innerHTML = "";
 
   if (!commanderName || !file) {
+    renderPreviewEmptyState("Enter a commander and upload a CSV to build a deck.");
     showToast("Enter a commander and upload a CSV.");
     updateProgress(0, "Idle");
     return;
@@ -1998,6 +2230,7 @@ async function generateDeck() {
   } catch (error) {
     console.error(error);
     updateProgress(0, "Error");
+    renderPreviewErrorState(error?.message || "Unable to render deck preview.");
     logMessage(`ERROR: ${error.message}`);
     showToast(error.message);
   } finally {
@@ -2017,6 +2250,7 @@ async function regenerateWithMode(mode) {
     updateProgress(100, "Deck complete!", `${currentBuildMode}`);
   } catch (error) {
     console.error(error);
+    renderPreviewErrorState(error?.message || "Unable to regenerate deck preview.");
     showToast(error.message);
     logMessage(`ERROR: ${error.message}`);
   } finally {
@@ -2117,13 +2351,19 @@ async function performBuildFromContext() {
 
   updateProgress(97, "Rendering results...");
   displayDeckSummary(finalDeck, commanderData.name, commanderData.colors);
+  renderDeckStats(finalDeck, commanderData.name, bracketInfo);
   displayDeckBracket(bracketInfo);
   displayGameChangers(bracketInfo);
   displayBuildBreakdown(finalDeck);
   displayWarnings(warnings);
   displayMoxfieldExport(finalDeck, commanderData.name, commanderThemes, strategyProfile, commanderData.colors);
+  renderManaCurve(finalDeck);
+  renderTypeBreakdown(finalDeck);
 
   logMessage(`Estimated ${bracketInfo.label} (score ${bracketInfo.score}).`);
   updateProgress(100, "Deck complete!", `${finalDeck.length} cards selected`);
   logMessage("Finished.");
 }
+
+
+renderPreviewEmptyState();
