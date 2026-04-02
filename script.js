@@ -170,6 +170,236 @@ function formatThemeLabel(theme) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function normalizeThemeName(theme) {
+  return String(theme || "")
+    .toLowerCase()
+    .replace(/[’']/g, "'")
+    .replace(/[\/_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isLikelyEdhrecTagCandidate(tag) {
+  const value = normalizeThemeName(tag);
+  if (!value || value.length < 2 || value.length > 40) return false;
+  if (/^[-+]?\d+$/.test(value)) return false;
+  if (["creatures","instants","sorceries","artifacts","enchantments","planeswalkers","lands","utility artifacts","utility lands","mana artifacts","top cards","high synergy cards","new cards","game changers","similar commanders","budget","expensive","salt","price","bracket","theme","tribe"].includes(value)) return false;
+  return /[a-z]/.test(value);
+}
+
+function getThemeAliases(theme) {
+  const normalized = normalizeThemeName(theme);
+  const aliases = new Set([normalized]);
+
+  const directAliases = {
+    "+1/+1 counters": ["counters", "countersmatter"],
+    "counters matter": ["counters", "countersmatter"],
+    "-1/-1 counters": ["counters"],
+    "tokens": ["tokens", "gowide"],
+    "sacrifice": ["sacrifice"],
+    "aristocrats": ["sacrifice", "tokens", "gowide"],
+    "lifegain": ["lifegain"],
+    "artifacts": ["artifacts"],
+    "enchantress": ["enchantments"],
+    "lands matter": ["lands"],
+    "landfall": ["lands"],
+    "spellslinger": ["spellslinger", "cantrips"],
+    "cantrips": ["cantrips", "spellslinger"],
+    "wheels": ["wheels"],
+    "group hug": ["group hug", "opponent draw"],
+    "card draw": ["cantrips"],
+    "reanimator": ["reanimator", "graveyard"],
+    "graveyard": ["graveyard", "reanimator"],
+    "self mill": ["graveyard", "reanimator"],
+    "mill": ["graveyard"],
+    "blink": ["blink"],
+    "voltron": ["voltron"],
+    "equipment": ["voltron"],
+    "auras": ["voltron"],
+    "treasure": ["artifacts", "tokens"],
+    "food": ["artifacts", "tokens", "lifegain"],
+    "clues": ["artifacts", "tokens"],
+    "populate": ["tokens", "gowide"],
+    "proliferate": ["counters", "countersmatter"],
+    "modified creatures": ["counters", "countersmatter", "voltron"],
+    "sagas": ["enchantments"],
+    "historic": ["artifacts"],
+    "hatebears": ["hatebears"],
+    "hydras": ["hydra tribal", "counters"],
+    "artificers": ["artificer tribal", "artifacts"],
+    "golems": ["golem tribal", "artifacts"],
+    "thopters": ["thopter tribal", "artifacts", "tokens"],
+    "constructs": ["construct tribal", "artifacts"]
+  };
+
+  if (directAliases[normalized]) {
+    for (const alias of directAliases[normalized]) aliases.add(alias);
+  }
+
+  const singularMap = {
+    bears: "bear tribal",
+    elves: "elf tribal",
+    zombies: "zombie tribal",
+    dragons: "dragon tribal",
+    vampires: "vampire tribal",
+    humans: "human tribal",
+    goblins: "goblin tribal",
+    angels: "angel tribal",
+    cats: "cat tribal",
+    merfolk: "merfolk tribal",
+    slivers: "sliver tribal",
+    demons: "demon tribal",
+    faeries: "faerie tribal",
+    knights: "knight tribal",
+    pirates: "pirate tribal",
+    wizards: "wizard tribal",
+    spirits: "spirit tribal",
+    soldiers: "soldier tribal",
+    hydras: "hydra tribal",
+    ninjas: "ninja tribal",
+    elementals: "elemental tribal",
+    shapeshifters: "shapeshifter tribal",
+    warriors: "warrior tribal",
+    clerics: "cleric tribal",
+    dogs: "dog tribal",
+    snakes: "snake tribal",
+    beasts: "beast tribal",
+    wolves: "wolf tribal",
+    giants: "giant tribal",
+    oozes: "ooze tribal",
+    wurms: "wurm tribal",
+    frogs: "frog tribal",
+    insects: "insect tribal",
+    rogues: "rogue tribal",
+    spiders: "spider tribal",
+    squirrels: "squirrel tribal",
+    mutants: "mutant tribal",
+    gods: "god tribal",
+    dwarves: "dwarf tribal",
+    lizards: "lizard tribal",
+    rabbits: "rabbit tribal",
+    bats: "bat tribal",
+    druids: "druid tribal",
+    monks: "monk tribal",
+    orcs: "orc tribal",
+    devils: "devil tribal",
+    robots: "robot tribal",
+    crabs: "crab tribal",
+    phoenixes: "phoenix tribal",
+    praetors: "praetor tribal",
+    plants: "plant tribal",
+    turtles: "turtle tribal",
+    archers: "archer tribal",
+    illusions: "illusion tribal",
+    unicorns: "unicorn tribal",
+    monkeys: "monkey tribal",
+    avatars: "avatar tribal",
+    horses: "horse tribal",
+    rebels: "rebel tribal",
+    nightmares: "nightmare tribal",
+    kithkin: "kithkin tribal",
+    griffins: "griffin tribal",
+    advisors: "advisor tribal",
+    satyrs: "satyr tribal",
+    shamans: "shaman tribal",
+    foxes: "fox tribal",
+    daleks: "dalek tribal",
+    atogs: "atog tribal"
+  };
+
+  if (singularMap[normalized]) aliases.add(singularMap[normalized]);
+  if (normalized.endsWith(" tribal")) aliases.add(normalized);
+  return Array.from(aliases);
+}
+
+function buildThemeSignalSet(themes) {
+  const signals = new Set();
+  for (const theme of themes || []) {
+    for (const alias of getThemeAliases(theme)) {
+      if (alias) signals.add(alias);
+    }
+  }
+  return signals;
+}
+
+function commanderHasTheme(commanderThemes, signal) {
+  return buildThemeSignalSet(commanderThemes).has(normalizeThemeName(signal));
+}
+
+function getCommanderTribalThemes(commanderThemes) {
+  const tribal = [];
+  const seen = new Set();
+  for (const theme of commanderThemes || []) {
+    for (const alias of getThemeAliases(theme)) {
+      if (alias.endsWith(" tribal") && !seen.has(alias)) {
+        seen.add(alias);
+        tribal.push(alias);
+      }
+    }
+  }
+  return tribal;
+}
+
+function extractLikelyTags(value, weights) {
+  if (Array.isArray(value)) {
+    if (value.every((item) => typeof item === "string")) {
+      value.forEach((tag, index) => {
+        if (!isLikelyEdhrecTagCandidate(tag)) return;
+        const key = normalizeThemeName(tag);
+        weights.set(key, Math.max(weights.get(key) || 0, value.length - index));
+      });
+      return;
+    }
+
+    value.forEach((item) => extractLikelyTags(item, weights));
+    return;
+  }
+
+  if (!value || typeof value !== "object") return;
+
+  for (const [key, nested] of Object.entries(value)) {
+    const lowerKey = normalizeThemeName(key);
+
+    if (lowerKey.includes("tag") && typeof nested === "string" && isLikelyEdhrecTagCandidate(nested)) {
+      const tagKey = normalizeThemeName(nested);
+      weights.set(tagKey, Math.max(weights.get(tagKey) || 0, 6));
+      continue;
+    }
+
+    if (lowerKey.includes("tag") && Array.isArray(nested) && nested.every((item) => typeof item === "string")) {
+      nested.forEach((tag, index) => {
+        if (!isLikelyEdhrecTagCandidate(tag)) return;
+        const tagKey = normalizeThemeName(tag);
+        weights.set(tagKey, Math.max(weights.get(tagKey) || 0, nested.length - index + 2));
+      });
+      continue;
+    }
+
+    if (lowerKey.includes("tag") && Array.isArray(nested)) {
+      nested.forEach((item, index) => {
+        if (!item || typeof item !== "object") return;
+        const label = item.name || item.label || item.tag || item.value || item.header;
+        if (!isLikelyEdhrecTagCandidate(label)) return;
+        const count = Number(item.count || item.num_decks || item.decks || item.value_count || 0);
+        const score = count > 0 ? count : Math.max(1, nested.length - index + 1);
+        const tagKey = normalizeThemeName(label);
+        weights.set(tagKey, Math.max(weights.get(tagKey) || 0, score));
+      });
+    }
+
+    extractLikelyTags(nested, weights);
+  }
+}
+
+function extractEdhrecTagsFromData(data) {
+  const weights = new Map();
+  extractLikelyTags(data, weights);
+  return Array.from(weights.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([tag]) => tag)
+    .slice(0, 5);
+}
+
 
 function getCardText(card) {
   return String(card?.text ?? card?.oracle_text ?? card?.rawText ?? "").toLowerCase();
@@ -860,7 +1090,12 @@ async function getEDHREC(commanderName) {
     }
   }
 
-  return Array.from(deduped.values());
+  const tags = extractEdhrecTagsFromData(data);
+
+  return {
+    cards: Array.from(deduped.values()),
+    tags
+  };
 }
 
 async function fetchCardDataBatchWithProgress(cardNames, progressCallback) {
@@ -948,7 +1183,12 @@ function detectTribalThemes(cards) {
     .map(([tribe]) => `${tribe} tribal`);
 }
 
-async function detectCommanderThemes(edhrecCards, collectionData, allOwnedCardData, commanderColors) {
+async function detectCommanderThemes(edhrecCards, edhrecTags, collectionData, allOwnedCardData, commanderColors) {
+  const cleanedTags = Array.from(new Set((edhrecTags || []).map(normalizeThemeName).filter(Boolean)));
+  if (cleanedTags.length) {
+    return cleanedTags.slice(0, 5);
+  }
+
   const topSynergy = [...edhrecCards]
     .sort((a, b) => b.synergy - a.synergy)
     .slice(0, 36);
@@ -1001,11 +1241,11 @@ async function detectCommanderThemes(edhrecCards, collectionData, allOwnedCardDa
     lands: 0,
     spellslinger: 0,
     sacrifice: 0,
-    countersMatter: 0,
+    countersmatter: 0,
     lifegain: 0,
     reanimator: 0,
     blink: 0,
-    goWide: 0,
+    gowide: 0,
     voltron: 0
   };
 
@@ -1051,19 +1291,19 @@ async function detectCommanderThemes(edhrecCards, collectionData, allOwnedCardDa
       text.includes("put counters on")
     ) {
       themeCounts.counters += 3;
-      themeCounts.countersMatter += 2;
+      themeCounts.countersmatter += 2;
     }
 
     if (text.includes("proliferate") || text.includes("double the number of")) {
       themeCounts.counters += 2;
-      themeCounts.countersMatter += 3;
+      themeCounts.countersmatter += 3;
     }
 
     if (text.includes("graveyard")) themeCounts.graveyard += 2;
 
     if (text.includes("create") && text.includes("token")) {
       themeCounts.tokens += 2;
-      themeCounts.goWide += 2;
+      themeCounts.gowide += 2;
     }
 
     if (type.includes("artifact")) themeCounts.artifacts += 1;
@@ -1106,6 +1346,7 @@ async function detectCommanderThemes(edhrecCards, collectionData, allOwnedCardDa
 
 function getCommanderStrategyProfile(commanderName, commanderThemes, commanderColors) {
   const normalizedName = normalizeCardName(commanderName);
+  const themeSignals = buildThemeSignalSet(commanderThemes);
 
   const profile = {
     wantsCreatures: false,
@@ -1120,14 +1361,14 @@ function getCommanderStrategyProfile(commanderName, commanderThemes, commanderCo
     monoColor: commanderColors.length === 1
   };
 
-  if (commanderThemes.includes("tokens")) profile.wantsTokens = true;
-  if (commanderThemes.includes("sacrifice")) profile.wantsSacrifice = true;
-  if (commanderThemes.includes("goWide")) profile.wantsGoWide = true;
-  if (commanderThemes.includes("cantrips")) profile.wantsCantrips = true;
-  if (commanderThemes.includes("counters")) profile.wantsCounters = true;
-  if (commanderThemes.includes("group hug")) profile.wantsGroupHug = true;
+  if (themeSignals.has("tokens")) profile.wantsTokens = true;
+  if (themeSignals.has("sacrifice")) profile.wantsSacrifice = true;
+  if (themeSignals.has("gowide")) profile.wantsGoWide = true;
+  if (themeSignals.has("cantrips") || themeSignals.has("spellslinger")) profile.wantsCantrips = true;
+  if (themeSignals.has("counters") || themeSignals.has("countersmatter")) profile.wantsCounters = true;
+  if (themeSignals.has("group hug") || themeSignals.has("opponent draw")) profile.wantsGroupHug = true;
 
-  const tribalThemes = commanderThemes.filter((t) => t.endsWith(" tribal"));
+  const tribalThemes = getCommanderTribalThemes(commanderThemes);
   if (tribalThemes.length) {
     profile.wantsTribal = true;
     profile.wantsCreatures = true;
@@ -1327,7 +1568,7 @@ function detectCardTags(card) {
   if (text.includes("graveyard")) tags.push("graveyard");
   if (text.includes("token")) {
     tags.push("tokens");
-    tags.push("goWide");
+    tags.push("gowide");
   }
   if (type.includes("artifact")) tags.push("artifacts");
   if (type.includes("enchantment")) tags.push("enchantments");
@@ -1337,7 +1578,7 @@ function detectCardTags(card) {
 
   if (text.includes("+1/+1 counter") || text.includes("put a counter on") || text.includes("put counters on")) {
     tags.push("counters");
-    tags.push("countersMatter");
+    tags.push("countersmatter");
   }
 
   if (text.includes("gain life") || text.includes("life total")) tags.push("lifegain");
@@ -1402,10 +1643,11 @@ function scoreCard(card, edhrecCard, commanderThemes, strategyProfile, commander
   else if (card.cmc <= 6) curveBonus = 1;
 
   const tags = detectCardTags(card);
+  const themeSignals = buildThemeSignalSet(commanderThemes);
   let themeBonus = 0;
 
   for (const tag of tags) {
-    if (commanderThemes.includes(tag)) themeBonus += 5;
+    if (themeSignals.has(normalizeThemeName(tag))) themeBonus += 5;
   }
 
   if (strategyProfile.wantsCreatures && isCreatureCard(card)) themeBonus += 5 * modePrefs.creatureBias;
@@ -1419,9 +1661,9 @@ function scoreCard(card, edhrecCard, commanderThemes, strategyProfile, commander
     }
   }
 
-  if (commanderThemes.includes("group hug") && tags.includes("opponent draw")) themeBonus += 4;
-  if (commanderThemes.includes("counters") && tags.includes("counters")) themeBonus += 4;
-  if (commanderThemes.includes("cantrips") && tags.includes("cantrips")) themeBonus += 3;
+  if (themeSignals.has("group hug") && tags.includes("opponent draw")) themeBonus += 4;
+  if (themeSignals.has("counters") && tags.includes("counters")) themeBonus += 4;
+  if (themeSignals.has("cantrips") && tags.includes("cantrips")) themeBonus += 3;
 
   let penalty = 0;
   if (isLowPriorityMonoColorRock(card, commanderColors, strategyProfile)) penalty += 8;
@@ -1445,8 +1687,9 @@ function scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColo
   else if (card.cmc <= 6) score += 1;
 
   const tags = detectCardTags(card);
+  const themeSignals = buildThemeSignalSet(commanderThemes);
   for (const tag of tags) {
-    if (commanderThemes.includes(tag)) score += 4 * modePrefs.synergyBias;
+    if (themeSignals.has(normalizeThemeName(tag))) score += 4 * modePrefs.synergyBias;
   }
 
   if (strategyProfile.wantsCreatures && isCreatureCard(card)) score += 6 * modePrefs.creatureBias;
@@ -1867,8 +2110,12 @@ function generateCardReasons(card, commanderThemes, strategyProfile, commanderCo
   if (isSacrificeCard(card)) reasons.push("sac outlet");
   if (GAME_CHANGERS.has(normalizeCardName(card.name))) reasons.push("game changer");
 
+  const themeSignals = buildThemeSignalSet(commanderThemes);
   for (const theme of commanderThemes) {
-    if (tags.includes(theme)) reasons.push(theme);
+    const aliases = getThemeAliases(theme);
+    if (aliases.some((alias) => tags.includes(alias)) || themeSignals.has(normalizeThemeName(theme)) && tags.includes(normalizeThemeName(theme))) {
+      reasons.push(theme);
+    }
   }
 
   if (strategyProfile.wantsTribal) {
@@ -2008,11 +2255,11 @@ function estimateDeckBracket(deck, commanderThemes, commanderColors, commanderNa
   score += compactComboCount * 2.5;
   score += gameChangerCount * 1.2;
 
-  if (commanderThemes.includes("tokens")) score += 0.4;
-  if (commanderThemes.includes("sacrifice")) score += 0.4;
-  if (commanderThemes.includes("cantrips")) score += 0.6;
-  if (commanderThemes.includes("counters")) score += 0.3;
-  if (commanderThemes.some((t) => t.endsWith(" tribal"))) score += 0.3;
+  if (commanderHasTheme(commanderThemes, "tokens")) score += 0.4;
+  if (commanderHasTheme(commanderThemes, "sacrifice")) score += 0.4;
+  if (commanderHasTheme(commanderThemes, "cantrips")) score += 0.6;
+  if (commanderHasTheme(commanderThemes, "counters")) score += 0.3;
+  if (getCommanderTribalThemes(commanderThemes).length) score += 0.3;
 
   if (commanderColors.length >= 3) score += 0.3;
   if (creatures >= 24) score -= 0.3;
@@ -2121,10 +2368,10 @@ function generateWarnings(deck, commanderThemes, bracketInfo) {
   const nonbasics = deck.filter((c) => c.source === "nonbasic-land").length;
   const fallbackCards = deck.filter((c) => c.source === "fallback" || c.source === "fallback-creature").length;
 
-  if (commanderThemes.some((t) => t.endsWith(" tribal")) && creatures < 22) {
+  if (getCommanderTribalThemes(commanderThemes).length && creatures < 22) {
     warnings.push("Low creature count for a tribal deck.");
   }
-  if (commanderThemes.includes("goWide") && creatures < 20) {
+  if (commanderHasTheme(commanderThemes, "gowide") && creatures < 20) {
     warnings.push("Go-wide strategy may be light on creatures or token bodies.");
   }
   if (ramp < 8) warnings.push("Ramp count is on the low side.");
@@ -2396,9 +2643,14 @@ async function generateDeck() {
 
     updateProgress(18, "Fetching EDHREC synergy data...");
     logMessage("Loading commander recommendations from EDHREC.");
-    const edhrecCards = await getEDHREC(commanderData.name);
+    const edhrecData = await getEDHREC(commanderData.name);
+    const edhrecCards = Array.isArray(edhrecData?.cards) ? edhrecData.cards : [];
+    const edhrecTags = Array.isArray(edhrecData?.tags) ? edhrecData.tags : [];
     if (!edhrecCards.length) throw new Error("No EDHREC data returned for this commander.");
     logMessage(`EDHREC returned ${edhrecCards.length} candidate cards.`);
+    if (edhrecTags.length) {
+      logMessage(`Using EDHREC tags: ${edhrecTags.map(formatThemeLabel).join(", ")}`);
+    }
 
     updateProgress(30, "Fetching collection metadata for theme discovery...");
     const allOwnedNames = collection.originals.map((x) => x.rawName);
