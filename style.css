@@ -958,24 +958,25 @@ button:disabled {
 }
 
 
-.priority-group {
-  margin-top: 14px;
+.priority-section {
+  margin-bottom: 12px;
 }
 
-.priority-group:first-of-type {
-  margin-top: 0;
+.priority-section:last-child {
+  margin-bottom: 0;
 }
 
-.priority-group-title {
+.priority-section-label {
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #93c5fd;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
   margin-bottom: 8px;
 }
 
-.priority-empty {
-  color: #94a3b8;
-  font-size: 13px;
+.priority-section-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
