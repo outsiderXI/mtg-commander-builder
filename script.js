@@ -977,7 +977,8 @@ function hasTribalType(card, tribe) {
 }
 
 function isTokenMaker(card) {
-  return getCardText(card).includes("create") && getCardText(card).includes("token");
+  const text = getCardText(card);
+  return text.includes("create") && text.includes("token");
 }
 
 function isSacrificeCard(card) {
@@ -1491,7 +1492,7 @@ function buildDeckFromScoredPool(
     usedNames.add(key);
   }
 
-  const currentCreatureCount = () => deck.filter((c) => c.type.includes("creature")).length;
+  const currentCreatureCount = () => deck.filter((c) => getCardType(c).includes("creature")).length;
 
   if (currentCreatureCount() < minimumCreatureCount) {
     const creatureFallbackPool = [];
@@ -1621,7 +1622,7 @@ function mergeDeckCounts(deck) {
         role: card.role,
         source: card.source,
         reasons: card.reasons || [],
-        text: card.text || card.oracle_text || card.rawText || "",
+        text: card.text || card.oracle_text || "",
         cmc: card.cmc || 0
       });
     } else {
@@ -1632,6 +1633,17 @@ function mergeDeckCounts(deck) {
   }
 
   return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function sanitizeDeckCards(deck) {
+  return (deck || []).filter(Boolean).map((card) => ({
+    ...card,
+    name: String(card?.name || "Unknown Card"),
+    type: String(card?.type || card?.type_line || ""),
+    text: String(card?.text || card?.oracle_text || card?.rawText || ""),
+    colors: Array.isArray(card?.colors) ? card.colors : [],
+    cmc: Number(card?.cmc) || Number(card?.mana_value) || 0
+  }));
 }
 
 function getCardSection(cardType) {
@@ -2343,31 +2355,33 @@ async function performBuildFromContext() {
     modePrefs
   );
 
-  logMessage(`Built final deck with ${finalDeck.length} cards.`);
-  logMessage(`Final deck breakdown: ${finalDeck.filter(c => c.role !== "land").length} nonlands, ${finalDeck.filter(c => c.role === "land").length} lands.`);
+  const sanitizedFinalDeck = sanitizeDeckCards(finalDeck);
+
+  logMessage(`Built final deck with ${sanitizedFinalDeck.length} cards.`);
+  logMessage(`Final deck breakdown: ${sanitizedFinalDeck.filter(c => c.role !== "land").length} nonlands, ${sanitizedFinalDeck.filter(c => c.role === "land").length} lands.`);
 
   const bracketInfo = estimateDeckBracket(
-    finalDeck,
+    sanitizedFinalDeck,
     commanderThemes,
     commanderData.colors,
     commanderData.name
   );
 
-  const warnings = generateWarnings(finalDeck, commanderThemes, bracketInfo);
+  const warnings = generateWarnings(sanitizedFinalDeck, commanderThemes, bracketInfo);
 
   updateProgress(97, "Rendering results...");
-  displayDeckSummary(finalDeck, commanderData.name, commanderData.colors);
-  renderDeckStats(finalDeck, commanderData.name, bracketInfo);
+  displayDeckSummary(sanitizedFinalDeck, commanderData.name, commanderData.colors);
+  renderDeckStats(sanitizedFinalDeck, commanderData.name, bracketInfo);
   displayDeckBracket(bracketInfo);
   displayGameChangers(bracketInfo);
-  displayBuildBreakdown(finalDeck);
+  displayBuildBreakdown(sanitizedFinalDeck);
   displayWarnings(warnings);
-  displayMoxfieldExport(finalDeck, commanderData.name, commanderThemes, strategyProfile, commanderData.colors);
-  renderManaCurve(finalDeck);
-  renderTypeBreakdown(finalDeck);
+  displayMoxfieldExport(sanitizedFinalDeck, commanderData.name, commanderThemes, strategyProfile, commanderData.colors);
+  renderManaCurve(sanitizedFinalDeck);
+  renderTypeBreakdown(sanitizedFinalDeck);
 
   logMessage(`Estimated ${bracketInfo.label} (score ${bracketInfo.score}).`);
-  updateProgress(100, "Deck complete!", `${finalDeck.length} cards selected`);
+  updateProgress(100, "Deck complete!", `${sanitizedFinalDeck.length} cards selected`);
   logMessage("Finished.");
 }
 
