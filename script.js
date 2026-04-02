@@ -111,15 +111,48 @@ copyExportBtn.addEventListener("click", copyMoxfieldExport);
 commanderInput.addEventListener("input", onCommanderInput);
 commanderInput.addEventListener("keydown", onAutocompleteKeydown);
 
-document.querySelectorAll(".priority-btn").forEach((btn) => {
-  btn.addEventListener("click", () => regenerateWithMode(btn.dataset.mode));
-});
 
 document.addEventListener("click", (event) => {
   if (!autocompleteList.contains(event.target) && event.target !== commanderInput) {
     hideAutocomplete();
   }
 });
+
+function getModeLabel(mode) {
+  if (mode === "balanced") return "Balanced";
+  if (mode === "fewer-staples") return "Fewer Staples";
+  if (mode.startsWith("theme:")) return formatThemeLabel(mode.slice(6));
+  if (mode.startsWith("bracket:")) return `Bracket ${mode.slice(8)}`;
+  return formatThemeLabel(mode);
+}
+
+function renderPriorityControls(themes = []) {
+  const themeWrap = document.getElementById("themePriorityButtons");
+  const bracketWrap = document.getElementById("bracketPriorityButtons");
+  const miscWrap = document.getElementById("miscPriorityButtons");
+  if (!themeWrap || !bracketWrap || !miscWrap) return;
+
+  const uniqueThemes = Array.from(new Set((themes || []).filter(Boolean)));
+
+  themeWrap.innerHTML = uniqueThemes.length
+    ? uniqueThemes.map((theme) => `<button class="priority-btn" data-mode="theme:${escapeHtml(theme)}" type="button">${escapeHtml(formatThemeLabel(theme))}</button>`).join("")
+    : '<div class="priority-empty">No detected themes for this commander.</div>';
+
+  bracketWrap.innerHTML = [1,2,3,4,5]
+    .map((n) => `<button class="priority-btn" data-mode="bracket:${n}" type="button">Bracket ${n}</button>`)
+    .join("");
+
+  miscWrap.innerHTML = `
+    <button class="priority-btn" data-mode="balanced" type="button">Balanced</button>
+    <button class="priority-btn" data-mode="fewer-staples" type="button">Fewer Staples</button>
+  `;
+
+  document.querySelectorAll(".priority-btn").forEach((btn) => {
+    btn.addEventListener("click", () => regenerateWithMode(btn.dataset.mode));
+  });
+
+  updatePriorityButtons();
+}
 
 function updatePriorityButtons() {
   document.querySelectorAll(".priority-btn").forEach((btn) => {
@@ -1392,26 +1425,28 @@ function getCommanderStrategyProfile(commanderName, commanderThemes, commanderCo
 }
 
 function getModePreferences(mode, strategyProfile) {
+  const targetTheme = mode.startsWith("theme:") ? mode.slice(6) : "";
+  const targetBracket = mode.startsWith("bracket:") ? Number(mode.slice(8)) : null;
+  const lowerBracket = targetBracket !== null && targetBracket <= 2;
+  const higherBracket = targetBracket !== null && targetBracket >= 4;
+
   return {
     mode,
+    targetTheme,
+    targetBracket,
     synergyBias:
-      mode === "more-synergistic" ? 1.4 :
-      mode === "more-tribal" ? 1.25 :
+      targetTheme ? 1.28 :
+      higherBracket ? 1.18 :
+      lowerBracket ? 0.94 :
       mode === "balanced" ? 1 :
-      mode === "more-casual" ? 0.9 :
       1,
     creatureBias:
-      mode === "more-creatures" ? 1.6 :
-      mode === "more-tribal" ? 1.35 :
       strategyProfile.wantsCreatures ? 1.1 : 1,
-    casualBias: mode === "more-casual" ? 1.4 : 1,
-    manaBaseBias: mode === "stronger-mana-base" ? 1.35 : 1,
-    fewerStaplesBias: mode === "fewer-staples" ? 1.5 : 1,
-    tribalBias: mode === "more-tribal" ? 1.5 : 1,
-    minimumCreatureBonus:
-      mode === "more-creatures" ? 8 :
-      mode === "more-tribal" ? 6 :
-      0
+    casualBias: lowerBracket ? 1.35 : 1,
+    manaBaseBias: higherBracket ? 1.12 : 1,
+    fewerStaplesBias: mode === "fewer-staples" || lowerBracket ? 1.5 : 1,
+    tribalBias: targetTheme && normalizeThemeName(targetTheme).includes("tribal") ? 1.45 : 1,
+    minimumCreatureBonus: targetTheme && normalizeThemeName(targetTheme).includes("tribal") ? 5 : 0
   };
 }
 
@@ -1651,6 +1686,18 @@ function scoreCard(card, edhrecCard, commanderThemes, strategyProfile, commander
   }
 
   if (strategyProfile.wantsCreatures && isCreatureCard(card)) themeBonus += 5 * modePrefs.creatureBias;
+
+  if (modePrefs.targetTheme) {
+    const targetAliases = getThemeAliases(modePrefs.targetTheme);
+    for (const alias of targetAliases) {
+      const normalizedAlias = normalizeThemeName(alias);
+      if (tags.includes(normalizedAlias)) themeBonus += 8;
+      if (normalizedAlias.endsWith(" tribal")) {
+        const tribe = normalizedAlias.replace(" tribal", "");
+        if (hasTribalType(card, tribe)) themeBonus += 10 * modePrefs.tribalBias;
+      }
+    }
+  }
   if (strategyProfile.wantsTokens && isTokenMaker(card)) themeBonus += 7 * modePrefs.synergyBias;
   if (strategyProfile.wantsSacrifice && isSacrificeCard(card)) themeBonus += 6 * modePrefs.synergyBias;
   if (strategyProfile.wantsGoWide && isCreatureCard(card)) themeBonus += 3 * modePrefs.creatureBias;
@@ -1669,6 +1716,15 @@ function scoreCard(card, edhrecCard, commanderThemes, strategyProfile, commander
   if (isLowPriorityMonoColorRock(card, commanderColors, strategyProfile)) penalty += 8;
   if (modePrefs.casualBias > 1 && GAME_CHANGERS.has(normalizeCardName(card.name))) penalty += 10 * modePrefs.casualBias;
   if (modePrefs.fewerStaplesBias > 1 && isGenericStaple(card)) penalty += 6 * modePrefs.fewerStaplesBias;
+  if (modePrefs.targetBracket !== null) {
+    if (modePrefs.targetBracket <= 2) {
+      if (Number(edhrecCard.synergy || 0) > 0.35) penalty += 2;
+      if (card.cmc <= 1) penalty += 1.5;
+    } else if (modePrefs.targetBracket >= 4) {
+      if (Number(edhrecCard.synergy || 0) > 0.35) themeBonus += 3;
+      if (card.cmc <= 2) themeBonus += 1.5;
+    }
+  }
 
   return synergyScore * modePrefs.synergyBias + popularityScore + roleBonus + curveBonus + themeBonus - penalty;
 }
@@ -1693,6 +1749,18 @@ function scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColo
   }
 
   if (strategyProfile.wantsCreatures && isCreatureCard(card)) score += 6 * modePrefs.creatureBias;
+
+  if (modePrefs.targetTheme) {
+    const targetAliases = getThemeAliases(modePrefs.targetTheme);
+    for (const alias of targetAliases) {
+      const normalizedAlias = normalizeThemeName(alias);
+      if (tags.includes(normalizedAlias)) score += 7;
+      if (normalizedAlias.endsWith(" tribal")) {
+        const tribe = normalizedAlias.replace(" tribal", "");
+        if (hasTribalType(card, tribe)) score += 10 * modePrefs.tribalBias;
+      }
+    }
+  }
   if (strategyProfile.wantsTokens && isTokenMaker(card)) score += 8 * modePrefs.synergyBias;
   if (strategyProfile.wantsSacrifice && isSacrificeCard(card)) score += 7 * modePrefs.synergyBias;
   if (strategyProfile.wantsGoWide && isCreatureCard(card)) score += 3 * modePrefs.creatureBias;
@@ -1706,6 +1774,13 @@ function scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColo
   if (isLowPriorityMonoColorRock(card, commanderColors, strategyProfile)) score -= 8;
   if (modePrefs.casualBias > 1 && GAME_CHANGERS.has(normalizeCardName(card.name))) score -= 10 * modePrefs.casualBias;
   if (modePrefs.fewerStaplesBias > 1 && isGenericStaple(card)) score -= 6 * modePrefs.fewerStaplesBias;
+  if (modePrefs.targetBracket !== null) {
+    if (modePrefs.targetBracket <= 2) {
+      if (card.cmc <= 1) score -= 1;
+    } else if (modePrefs.targetBracket >= 4) {
+      if (card.cmc <= 2) score += 1.25;
+    }
+  }
 
   return score;
 }
@@ -2699,6 +2774,7 @@ async function generateDeck() {
     };
 
     await performBuildFromContext();
+    renderPriorityControls(commanderThemes);
     document.getElementById("postBuildControls").classList.remove("hidden");
   } catch (error) {
     console.error(error);
@@ -2718,9 +2794,9 @@ async function regenerateWithMode(mode) {
   setGenerateEnabled(false);
   try {
     logMessage(`Regenerating with priority mode: ${mode}.`);
-    updateProgress(90, "Regenerating deck...", mode);
+    updateProgress(90, "Regenerating deck...", getModeLabel(mode));
     await performBuildFromContext();
-    updateProgress(100, "Deck complete!", `${currentBuildMode}`);
+    updateProgress(100, "Deck complete!", getModeLabel(currentBuildMode));
   } catch (error) {
     console.error(error);
     renderPreviewErrorState(error?.message || "Unable to regenerate deck preview.");
