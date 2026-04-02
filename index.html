@@ -46,14 +46,20 @@
 
     <div id="postBuildControls" class="panel hidden">
       <h2>Regenerate With Different Priorities</h2>
-      <div class="priority-buttons">
-        <button class="priority-btn" data-mode="balanced" type="button">Balanced</button>
-        <button class="priority-btn" data-mode="more-synergistic" type="button">More Synergistic</button>
-        <button class="priority-btn" data-mode="more-creatures" type="button">More Creatures</button>
-        <button class="priority-btn" data-mode="more-casual" type="button">More Casual</button>
-        <button class="priority-btn" data-mode="stronger-mana-base" type="button">Stronger Mana Base</button>
-        <button class="priority-btn" data-mode="fewer-staples" type="button">Fewer Staples</button>
-        <button class="priority-btn" data-mode="more-tribal" type="button">More Tribal</button>
+
+      <div class="priority-group">
+        <div class="priority-group-title">Detected Themes</div>
+        <div id="themePriorityButtons" class="priority-buttons"></div>
+      </div>
+
+      <div class="priority-group">
+        <div class="priority-group-title">Bracket Target</div>
+        <div id="bracketPriorityButtons" class="priority-buttons"></div>
+      </div>
+
+      <div class="priority-group">
+        <div class="priority-group-title">Other</div>
+        <div id="miscPriorityButtons" class="priority-buttons"></div>
       </div>
     </div>
 
