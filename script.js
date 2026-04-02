@@ -1,958 +1,2561 @@
-* {
-  box-sizing: border-box;
+const SCRYFALL_NAMED = "https://api.scryfall.com/cards/named?exact=";
+const SCRYFALL_AUTOCOMPLETE = "https://api.scryfall.com/cards/autocomplete?q=";
+const SCRYFALL_COLLECTION = "https://api.scryfall.com/cards/collection";
+const EDHREC_BASE = "https://json.edhrec.com/pages/commanders/";
+const SCRYFALL_CARD_SEARCH = "https://scryfall.com/search?q=!";
+
+const commanderInput = document.getElementById("commanderInput");
+const autocompleteList = document.getElementById("autocompleteList");
+const generateBtn = document.getElementById("generateBtn");
+const copyExportBtn = document.getElementById("copyExportBtn");
+
+const commanderImage = document.getElementById("commanderImage");
+const commanderMeta = document.getElementById("commanderMeta");
+const commanderImageSkeleton = document.getElementById("commanderImageSkeleton");
+const colorPips = document.getElementById("colorPips");
+const toast = document.getElementById("toast");
+const deckStats = document.getElementById("deckStats");
+
+const cardCache = new Map();
+
+let autocompleteTimer = null;
+let activeAutocompleteIndex = -1;
+let currentAutocompleteItems = [];
+let toastTimer = null;
+let currentBuildMode = "balanced";
+let currentRunContext = null;
+
+const BASIC_LANDS = [
+  { name: "Plains", colorsProduced: ["W"] },
+  { name: "Island", colorsProduced: ["U"] },
+  { name: "Swamp", colorsProduced: ["B"] },
+  { name: "Mountain", colorsProduced: ["R"] },
+  { name: "Forest", colorsProduced: ["G"] },
+  { name: "Wastes", colorsProduced: [] }
+];
+
+const COLOR_TO_BASIC = {
+  W: "Plains",
+  U: "Island",
+  B: "Swamp",
+  R: "Mountain",
+  G: "Forest"
+};
+
+const TRIBAL_TYPES = [
+  "angel", "artifact creature", "bear", "bird", "cat", "cleric", "demon", "devil",
+  "dinosaur", "dragon", "drake", "druid", "elf", "faerie", "goblin", "human",
+  "hydra", "knight", "merfolk", "pirate", "rat", "samurai", "shaman", "sliver",
+  "snake", "soldier", "spirit", "treefolk", "vampire", "warlock", "warrior",
+  "wizard", "wolf", "zombie"
+];
+
+const GAME_CHANGERS = new Set([
+  "ad nauseam",
+  "ancient tomb",
+  "aura shards",
+  "biorhythm",
+  "bolas's citadel",
+  "braids, cabal minion",
+  "chrome mox",
+  "coalition victory",
+  "consecrated sphinx",
+  "crop rotation",
+  "cyclonic rift",
+  "demonic tutor",
+  "drannith magistrate",
+  "enlightened tutor",
+  "farewell",
+  "field of the dead",
+  "fierce guardianship",
+  "force of will",
+  "gaea's cradle",
+  "gamble",
+  "gifts ungiven",
+  "glacial chasm",
+  "grand arbiter augustin iv",
+  "grim monolith",
+  "humility",
+  "imperial seal",
+  "intuition",
+  "jeska's will",
+  "lion's eye diamond",
+  "mana vault",
+  "mishra's workshop",
+  "mox diamond",
+  "mystical tutor",
+  "narset, parter of veils",
+  "natural order",
+  "necropotence",
+  "notion theif",
+  "opposition agent",
+  "orcish bowmasters",
+  "panoptic mirror",
+  "rhystic study",
+  "seedborn muse",
+  "serra's sanctum",
+  "smothering tithe",
+  "survival of the fittest",
+  "teferi's protection",
+  "tegrid, god of fright",
+  "thassa's oracle",
+  "the one ring",
+  "the tabernacle of pendrell vale",
+  "underworld breach",
+  "vampiric tutor",
+  "worldly tutor"
+]);
+
+generateBtn.addEventListener("click", generateDeck);
+copyExportBtn.addEventListener("click", copyMoxfieldExport);
+commanderInput.addEventListener("input", onCommanderInput);
+commanderInput.addEventListener("keydown", onAutocompleteKeydown);
+
+document.querySelectorAll(".priority-btn").forEach((btn) => {
+  btn.addEventListener("click", () => regenerateWithMode(btn.dataset.mode));
+});
+
+document.addEventListener("click", (event) => {
+  if (!autocompleteList.contains(event.target) && event.target !== commanderInput) {
+    hideAutocomplete();
+  }
+});
+
+function updatePriorityButtons() {
+  document.querySelectorAll(".priority-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === currentBuildMode);
+  });
 }
 
-body {
-  margin: 0;
-  font-family: Arial, sans-serif;
-  background: #111827;
-  color: #f3f4f6;
+function updateProgress(percent, statusText, subStatus = "") {
+  document.getElementById("progressBar").style.width = `${Math.max(0, Math.min(100, percent))}%`;
+  document.getElementById("statusText").textContent = statusText;
+  document.getElementById("subStatusText").textContent = subStatus;
 }
 
-a {
-  color: #93c5fd;
-  text-decoration: none;
+function clearLog() {
+  return;
 }
 
-a:hover {
-  text-decoration: underline;
+function logMessage(message) {
+  return;
 }
 
-.app {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px;
+function showToast(message) {
+  toast.textContent = message;
+  toast.classList.remove("hidden");
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.add("hidden"), 1800);
 }
 
-h1, h2, h3, h4 {
-  margin-top: 0;
+function setGenerateEnabled(enabled) {
+  generateBtn.disabled = !enabled;
 }
 
-.panel {
-  background: #1f2937;
-  border: 1px solid #374151;
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 20px;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-.empty-state p {
-  margin: 0 0 10px;
-  color: #cbd5e1;
+function normalizeCardName(name) {
+  return String(name || "").trim().toLowerCase();
 }
 
-label {
-  display: block;
-  margin-bottom: 6px;
-  margin-top: 10px;
-  font-weight: 600;
+function formatThemeLabel(theme) {
+  if (!theme) return "";
+  return String(theme)
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-input[type="text"],
-input[type="file"],
-textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid #4b5563;
-  background: #111827;
-  color: #f3f4f6;
+
+function getCardType(card) {
+  return String(card?.type ?? card?.type_line ?? "");
 }
 
-button {
-  margin-top: 14px;
-  padding: 10px 16px;
-  border: none;
-  border-radius: 8px;
-  background: #2563eb;
-  color: white;
-  font-size: 15px;
-  cursor: pointer;
+function getCardText(card) {
+  return String(card?.text ?? card?.oracle_text ?? "");
 }
 
-button:hover {
-  background: #1d4ed8;
+function getCardImageUrl(card) {
+  if (!card) return "";
+
+  if (card.imageUrl) return String(card.imageUrl);
+  if (card.image_uris?.normal) return String(card.image_uris.normal);
+  if (card.image_uris?.large) return String(card.image_uris.large);
+
+  if (Array.isArray(card.card_faces)) {
+    for (const face of card.card_faces) {
+      if (face?.image_uris?.normal) return String(face.image_uris.normal);
+      if (face?.image_uris?.large) return String(face.image_uris.large);
+    }
+  }
+
+  if (card.image) return String(card.image);
+
+  return "";
 }
 
-button:disabled {
-  background: #4b5563;
-  cursor: not-allowed;
+function renderPreviewCardLink(cardName, scryfallUrl, imageUrl) {
+  const safeName = escapeHtml(cardName || "Unknown Card");
+  const safeUrl = escapeHtml(scryfallUrl || "#");
+  const safeImage = escapeHtml(imageUrl || "");
+  const safeCardName = escapeHtml(cardName || "");
+
+  return `
+    <span class="preview-card-link-wrap">
+      <a
+        class="preview-card-link"
+        href="${safeUrl}"
+        target="_blank"
+        rel="noopener noreferrer"
+        data-card-name="${safeCardName}"
+        ${safeImage ? `data-card-image="${safeImage}"` : ""}
+      >
+        ${safeName}
+      </a>
+    </span>
+  `;
 }
 
-.priority-buttons {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+let hoverPreviewEl = null;
+let hoverImageCache = new Map();
+let previewHoverBound = false;
+
+function ensureHoverPreview() {
+  if (hoverPreviewEl) return hoverPreviewEl;
+
+  hoverPreviewEl = document.createElement("div");
+  hoverPreviewEl.className = "card-hover-preview";
+  hoverPreviewEl.innerHTML = `<img alt="Card preview" />`;
+  document.body.appendChild(hoverPreviewEl);
+
+  return hoverPreviewEl;
 }
 
-.priority-btn.active {
-  background: #059669;
+function moveCardHoverPreview(mouseEvent) {
+  if (!hoverPreviewEl) return;
+
+  const padding = 18;
+  const width = hoverPreviewEl.offsetWidth || 265;
+  const height = hoverPreviewEl.offsetHeight || 370;
+
+  let left = mouseEvent.clientX + 18;
+  let top = mouseEvent.clientY + 18;
+
+  if (left + width > window.innerWidth - padding) {
+    left = mouseEvent.clientX - width - 18;
+  }
+
+  if (top + height > window.innerHeight - padding) {
+    top = window.innerHeight - height - padding;
+  }
+
+  if (top < padding) top = padding;
+  if (left < padding) left = padding;
+
+  hoverPreviewEl.style.left = `${left}px`;
+  hoverPreviewEl.style.top = `${top}px`;
 }
 
-#progressContainer {
-  width: 100%;
-  height: 20px;
-  background: #111827;
-  border: 1px solid #374151;
-  border-radius: 999px;
-  overflow: hidden;
-  margin-top: 10px;
+function showCardHoverPreview(imageUrl, mouseEvent) {
+  if (!imageUrl || window.innerWidth <= 900) return;
+
+  const el = ensureHoverPreview();
+  const img = el.querySelector("img");
+  if (img.getAttribute("src") !== imageUrl) {
+    img.setAttribute("src", imageUrl);
+  }
+
+  moveCardHoverPreview(mouseEvent);
+  el.classList.add("visible");
 }
 
-#progressBar {
-  height: 100%;
-  width: 0%;
-  background: linear-gradient(90deg, #10b981, #3b82f6);
-  transition: width 0.25s ease;
+async function resolveHoverImageUrl(link) {
+  const inlineImage = link.getAttribute("data-card-image") || "";
+  if (inlineImage) return inlineImage;
+
+  const cardName = (link.getAttribute("data-card-name") || "").trim();
+  if (!cardName) return "";
+
+  if (hoverImageCache.has(cardName)) {
+    return hoverImageCache.get(cardName);
+  }
+
+  try {
+    const response = await fetch(`${SCRYFALL_NAMED}${encodeURIComponent(cardName)}`);
+    if (!response.ok) throw new Error(`Failed to fetch image for ${cardName}`);
+    const data = await response.json();
+    const imageUrl = getCardImageUrl(data);
+    hoverImageCache.set(cardName, imageUrl || "");
+    if (imageUrl) {
+      link.setAttribute("data-card-image", imageUrl);
+    }
+    return imageUrl || "";
+  } catch (error) {
+    console.warn("Unable to fetch hover image", cardName, error);
+    hoverImageCache.set(cardName, "");
+    return "";
+  }
 }
 
-#statusText {
-  margin-top: 10px;
-  font-weight: 700;
+function hideCardHoverPreview() {
+  if (!hoverPreviewEl) return;
+  hoverPreviewEl.classList.remove("visible");
 }
 
-.sub-status {
-  margin-top: 4px;
-  color: #cbd5e1;
-  min-height: 20px;
+function bindPreviewHoverImages() {
+  if (previewHoverBound) return;
+
+  const preview = document.getElementById("exportPreview");
+  if (!preview) return;
+
+  preview.addEventListener("mouseover", async (event) => {
+    const link = event.target.closest(".preview-card-link");
+    if (!link || !preview.contains(link)) return;
+
+    const imageUrl = await resolveHoverImageUrl(link);
+    if (!imageUrl) return;
+    if (!link.matches(":hover")) return;
+
+    showCardHoverPreview(imageUrl, event);
+  });
+
+  preview.addEventListener("mousemove", (event) => {
+    const link = event.target.closest(".preview-card-link");
+    if (!link || !preview.contains(link)) return;
+    moveCardHoverPreview(event);
+  });
+
+  preview.addEventListener("mouseout", (event) => {
+    const fromLink = event.target.closest(".preview-card-link");
+    if (!fromLink) return;
+
+    const toElement = event.relatedTarget;
+    if (toElement && fromLink.contains(toElement)) return;
+
+    hideCardHoverPreview();
+  });
+
+  window.addEventListener("scroll", hideCardHoverPreview, { passive: true });
+  window.addEventListener("blur", hideCardHoverPreview);
+  previewHoverBound = true;
 }
 
-.log-wrap {
-  margin-top: 14px;
+
+function renderLoadingState() {
+  const preview = document.getElementById("exportPreview");
+
+  if (deckStats) {
+    deckStats.innerHTML = `
+      <div class="stat-skeleton-row">
+        <div class="skeleton skeleton-title"></div>
+        <div class="skeleton skeleton-pill"></div>
+      </div>
+      <div class="stat-grid">
+        <div class="skeleton skeleton-stat"></div>
+        <div class="skeleton skeleton-stat"></div>
+        <div class="skeleton skeleton-stat"></div>
+        <div class="skeleton skeleton-stat"></div>
+      </div>
+    `;
+  }
+
+  if (preview) {
+    preview.innerHTML = `
+      <div class="preview-section fade-up">
+        <div class="skeleton skeleton-section-title"></div>
+        <div class="skeleton skeleton-line"></div>
+        <div class="skeleton skeleton-line"></div>
+        <div class="skeleton skeleton-line short"></div>
+      </div>
+      <div class="preview-section fade-up">
+        <div class="skeleton skeleton-section-title"></div>
+        <div class="skeleton skeleton-line"></div>
+        <div class="skeleton skeleton-line"></div>
+        <div class="skeleton skeleton-line short"></div>
+      </div>
+    `;
+  }
 }
 
-.log-header {
-  font-weight: 700;
-  margin-bottom: 8px;
+function renderPreviewEmptyState(message = "Build a deck to see the grouped preview.") {
+  const preview = document.getElementById("exportPreview");
+  if (!preview) return;
+  preview.innerHTML = `
+    <div class="empty-state-card fade-up">
+      <div class="empty-state-icon">🃏</div>
+      <div class="empty-state-title">Nothing to preview yet</div>
+      <div class="empty-state-copy">${escapeHtml(message)}</div>
+    </div>
+  `;
 }
 
-.activity-log {
-  background: #0b1220;
-  border: 1px solid #374151;
-  border-radius: 8px;
-  height: 130px;
-  overflow-y: auto;
-  padding: 10px;
-  font-family: Consolas, Monaco, monospace;
-  font-size: 12px;
-  line-height: 1.4;
+function renderPreviewErrorState(message = "Something went wrong while preparing the preview.") {
+  const preview = document.getElementById("exportPreview");
+  if (!preview) return;
+  preview.innerHTML = `
+    <div class="error-state-card fade-up">
+      <div class="empty-state-icon">⚠️</div>
+      <div class="empty-state-title">Preview failed</div>
+      <div class="empty-state-copy">${escapeHtml(message)}</div>
+    </div>
+  `;
 }
 
-.log-line {
-  margin-bottom: 6px;
-  color: #d1d5db;
+function countByType(deck) {
+  const counts = {
+    Land: 0,
+    Creature: 0,
+    Instant: 0,
+    Sorcery: 0,
+    Artifact: 0,
+    Enchantment: 0,
+    Planeswalker: 0,
+    Other: 0
+  };
+
+  for (const card of deck || []) {
+    const typeLine = String(card.type || card.type_line || "").toLowerCase();
+    if (typeLine.includes("land")) counts.Land += 1;
+    else if (typeLine.includes("creature")) counts.Creature += 1;
+    else if (typeLine.includes("instant")) counts.Instant += 1;
+    else if (typeLine.includes("sorcery")) counts.Sorcery += 1;
+    else if (typeLine.includes("artifact")) counts.Artifact += 1;
+    else if (typeLine.includes("enchantment")) counts.Enchantment += 1;
+    else if (typeLine.includes("planeswalker")) counts.Planeswalker += 1;
+    else counts.Other += 1;
+  }
+
+  return counts;
 }
 
-.results-grid {
-  display: grid;
-  grid-template-columns: 320px 1fr;
-  gap: 20px;
+function averageManaValue(deck) {
+  const spells = (deck || []).filter((card) => !String(card.type || card.type_line || "").toLowerCase().includes("land"));
+  if (!spells.length) return "0";
+  const total = spells.reduce((sum, card) => sum + (Number(card.cmc) || Number(card.mana_value) || 0), 0);
+  return String(Math.round(total / spells.length));
 }
 
-.deck-summary,
-.build-breakdown,
-.warnings-panel {
-  margin-bottom: 12px;
-  color: #cbd5e1;
-  white-space: pre-line;
+function renderDeckStats(deck, commanderName, bracketInfo) {
+  if (!deckStats) return;
+
+  const typeCounts = countByType(deck);
+  const total = deck?.length || 0;
+
+  deckStats.innerHTML = `
+    <div class="stat-panel-header fade-up">
+      <div>
+        <div class="eyebrow">Deck Snapshot</div>
+        <div class="stat-panel-title">${escapeHtml(commanderName || "Commander Deck")}</div>
+      </div>
+      <div class="mini-badge">Bracket ${escapeHtml(String(bracketInfo?.bracket ?? "-"))}</div>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-card fade-up"><div class="stat-label">Cards</div><div class="stat-value">${total}</div></div>
+      <div class="stat-card fade-up"><div class="stat-label">Lands</div><div class="stat-value">${typeCounts.Land}</div></div>
+      <div class="stat-card fade-up"><div class="stat-label">Creatures</div><div class="stat-value">${typeCounts.Creature}</div></div>
+      <div class="stat-card fade-up"><div class="stat-label">Avg MV</div><div class="stat-value">${averageManaValue(deck)}</div></div>
+    </div>
+  `;
 }
 
-.deck-bracket {
-  margin-bottom: 12px;
-  font-weight: 700;
-  color: #fcd34d;
-  white-space: pre-line;
+let manaCurveChartInstance = null;
+let typeBreakdownChartInstance = null;
+
+function renderManaCurve(deck) {
+  const canvas = document.getElementById("manaCurveChart");
+  if (!canvas || typeof Chart === "undefined") return;
+
+  const buckets = [0, 0, 0, 0, 0, 0, 0, 0];
+  for (const card of deck || []) {
+    const typeLine = String(card.type || card.type_line || "").toLowerCase();
+    if (typeLine.includes("land")) continue;
+    const mv = Number(card.cmc) || Number(card.mana_value) || 0;
+    const index = Math.min(Math.floor(mv), 7);
+    buckets[index] += 1;
+  }
+
+  if (manaCurveChartInstance) manaCurveChartInstance.destroy();
+
+  manaCurveChartInstance = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: ["0", "1", "2", "3", "4", "5", "6", "7+"],
+      datasets: [{ label: "Cards", data: buckets, borderRadius: 8, maxBarThickness: 36 }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 650 },
+      plugins: { legend: { display: false } },
+      layout: { padding: 8 },
+      scales: {
+        x: { ticks: { color: "#cbd5e1" }, grid: { color: "rgba(255,255,255,0.05)" } },
+        y: { beginAtZero: true, ticks: { precision: 0, color: "#cbd5e1" }, grid: { color: "rgba(255,255,255,0.05)" } }
+      }
+    }
+  });
 }
 
-.deck-bracket .badge {
-  display: inline-block;
-  padding: 6px 10px;
-  border-radius: 999px;
-  color: #111827;
-  font-weight: 700;
+function renderTypeBreakdown(deck) {
+  const canvas = document.getElementById("typeBreakdownChart");
+  if (!canvas || typeof Chart === "undefined") return;
+
+  const counts = countByType(deck);
+  const labels = Object.keys(counts).filter((key) => counts[key] > 0);
+  const data = labels.map((key) => counts[key]);
+
+  if (typeBreakdownChartInstance) typeBreakdownChartInstance.destroy();
+
+  typeBreakdownChartInstance = new Chart(canvas, {
+    type: "doughnut",
+    data: {
+      labels,
+      datasets: [{ data }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 650 },
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: { boxWidth: 12, color: "#cbd5e1" }
+        }
+      },
+      cutout: "62%",
+      layout: { padding: 8 }
+    }
+  });
 }
 
-.badge-b1 { background: #cbd5e1; }
-.badge-b2 { background: #86efac; }
-.badge-b3 { background: #fde68a; }
-.badge-b4 { background: #fdba74; }
-.badge-b5 { background: #fca5a5; }
+function splitCsvLine(line) {
+  const result = [];
+  let current = "";
+  let inQuotes = false;
 
-.deck-game-changers {
-  margin-bottom: 12px;
-  color: #fca5a5;
-  white-space: pre-line;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    const next = line[i + 1];
+
+    if (char === '"' && inQuotes && next === '"') {
+      current += '"';
+      i += 1;
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  result.push(current);
+  return result;
 }
 
-.warnings-panel {
-  background: #0b1220;
-  border: 1px solid #374151;
-  border-radius: 8px;
-  padding: 12px;
+function renderAutocompleteLoading() {
+  autocompleteList.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = "autocomplete-item";
+  div.textContent = "Checking legal commanders...";
+  autocompleteList.appendChild(div);
+  autocompleteList.classList.remove("hidden");
 }
 
-.warning-line {
-  margin-bottom: 6px;
+async function onCommanderInput() {
+  const query = commanderInput.value.trim();
+
+  if (autocompleteTimer) clearTimeout(autocompleteTimer);
+
+  if (query.length < 2) {
+    hideAutocomplete();
+    return;
+  }
+
+  autocompleteTimer = setTimeout(async () => {
+    try {
+      renderAutocompleteLoading();
+      const matches = await fetchCommanderAutocomplete(query);
+      const legalMatches = await filterCommanderAutocomplete(matches);
+      renderAutocomplete(legalMatches);
+    } catch (error) {
+      console.error(error);
+      hideAutocomplete();
+    }
+  }, 180);
 }
 
-.theme-chips {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+function onAutocompleteKeydown(event) {
+  if (autocompleteList.classList.contains("hidden")) return;
+
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    activeAutocompleteIndex = Math.min(activeAutocompleteIndex + 1, currentAutocompleteItems.length - 1);
+    refreshActiveAutocompleteItem();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    activeAutocompleteIndex = Math.max(activeAutocompleteIndex - 1, 0);
+    refreshActiveAutocompleteItem();
+  } else if (event.key === "Enter") {
+    if (activeAutocompleteIndex >= 0 && currentAutocompleteItems[activeAutocompleteIndex]) {
+      event.preventDefault();
+      selectAutocompleteItem(currentAutocompleteItems[activeAutocompleteIndex]);
+    }
+  } else if (event.key === "Escape") {
+    hideAutocomplete();
+  }
 }
 
-.theme-chip {
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: #0b1220;
-  border: 1px solid #374151;
-  color: #dbeafe;
-  font-size: 13px;
+async function fetchCommanderAutocomplete(query) {
+  const response = await fetch(`${SCRYFALL_AUTOCOMPLETE}${encodeURIComponent(query)}`);
+  if (!response.ok) throw new Error("Autocomplete request failed.");
+  const data = await response.json();
+  return Array.isArray(data.data) ? data.data.slice(0, 12) : [];
 }
 
-.autocomplete-wrap {
-  position: relative;
+async function filterCommanderAutocomplete(items) {
+  if (!items.length) return [];
+  const cardMap = await fetchCardDataBatchWithProgress(items);
+  const legal = [];
+
+  for (const name of items) {
+    const card = cardMap.get(normalizeCardName(name));
+    if (card && canBeCommander(card)) legal.push(card.name);
+  }
+
+  return legal;
 }
 
-.autocomplete-list {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  background: #0b1220;
-  border: 1px solid #374151;
-  border-radius: 8px;
-  max-height: 240px;
-  overflow-y: auto;
-  z-index: 1000;
+function renderAutocomplete(items) {
+  currentAutocompleteItems = items;
+  activeAutocompleteIndex = -1;
+  autocompleteList.innerHTML = "";
+
+  if (!items.length) {
+    const div = document.createElement("div");
+    div.className = "autocomplete-item";
+    div.textContent = "No legal commanders found";
+    autocompleteList.appendChild(div);
+    autocompleteList.classList.remove("hidden");
+    return;
+  }
+
+  items.forEach((item, index) => {
+    const div = document.createElement("div");
+    div.className = "autocomplete-item";
+    div.textContent = item;
+    div.dataset.index = String(index);
+    div.addEventListener("click", () => selectAutocompleteItem(item));
+    autocompleteList.appendChild(div);
+  });
+
+  autocompleteList.classList.remove("hidden");
 }
 
-.autocomplete-item {
-  padding: 10px 12px;
-  cursor: pointer;
-  border-bottom: 1px solid #1f2937;
+function refreshActiveAutocompleteItem() {
+  const items = autocompleteList.querySelectorAll(".autocomplete-item");
+  items.forEach((el) => el.classList.remove("active"));
+  if (activeAutocompleteIndex >= 0 && items[activeAutocompleteIndex]) {
+    items[activeAutocompleteIndex].classList.add("active");
+  }
 }
 
-.autocomplete-item:last-child {
-  border-bottom: none;
+function selectAutocompleteItem(name) {
+  commanderInput.value = name;
+  hideAutocomplete();
 }
 
-.autocomplete-item:hover,
-.autocomplete-item.active {
-  background: #1e3a8a;
+function hideAutocomplete() {
+  autocompleteList.classList.add("hidden");
+  autocompleteList.innerHTML = "";
+  currentAutocompleteItems = [];
+  activeAutocompleteIndex = -1;
 }
 
-.hidden {
-  display: none !important;
+function isBasicLand(name) {
+  const normalized = normalizeCardName(name);
+  return BASIC_LANDS.some((land) => normalizeCardName(land.name) === normalized);
 }
 
-.export-box {
-  min-height: 260px;
-  font-family: Consolas, Monaco, monospace;
-  font-size: 13px;
-  line-height: 1.45;
-  resize: vertical;
+function hasOwnedCard(collectionData, cardName) {
+  const normalized = normalizeCardName(cardName);
+  return collectionData.byNormalized.has(normalized) || isBasicLand(cardName);
 }
 
-.export-preview {
-  background: #0b1220;
-  border: 1px solid #374151;
-  border-radius: 8px;
-  min-height: 200px;
-  max-height: 520px;
-  overflow-y: auto;
-  padding: 12px;
-  margin-bottom: 14px;
+async function parseCSV(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = (event) => {
+      try {
+        const text = event.target.result;
+        const lines = text.split(/\r?\n/).filter(Boolean);
+
+        if (lines.length < 2) throw new Error("CSV file appears to be empty.");
+
+        const header = splitCsvLine(lines[0]).map((x) => x.trim().toLowerCase());
+        const nameIndex = header.findIndex((h) => h === "name");
+        const qtyIndex = header.findIndex((h) => h === "quantity");
+
+        if (nameIndex === -1 || qtyIndex === -1) {
+          throw new Error("CSV must contain Name and Quantity columns.");
+        }
+
+        const byNormalized = new Map();
+        const originals = [];
+
+        for (let i = 1; i < lines.length; i++) {
+          const cols = splitCsvLine(lines[i]);
+          if (!cols.length) continue;
+
+          const rawName = (cols[nameIndex] || "").trim();
+          const rawQty = (cols[qtyIndex] || "").trim();
+          if (!rawName) continue;
+
+          const quantity = Number.parseInt(rawQty, 10);
+          if (!Number.isFinite(quantity) || quantity <= 0) continue;
+
+          const normalizedName = normalizeCardName(rawName);
+          byNormalized.set(normalizedName, (byNormalized.get(normalizedName) || 0) + quantity);
+          originals.push({ rawName, normalizedName, quantity });
+        }
+
+        resolve({ byNormalized, originals });
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    reader.onerror = () => reject(new Error("Failed to read CSV file."));
+    reader.readAsText(file);
+  });
 }
 
-.preview-heading {
-  font-weight: 700;
-  margin-bottom: 8px;
-  margin-top: 8px;
+function toEdhrecSlug(name) {
+  return name
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/,/g, "")
+    .replace(/\//g, " ")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-");
 }
 
-.preview-section {
-  margin-bottom: 16px;
+function pickCommanderImage(data) {
+  if (data.image_uris?.normal) return data.image_uris.normal;
+  if (Array.isArray(data.card_faces)) {
+    for (const face of data.card_faces) {
+      if (face.image_uris?.normal) return face.image_uris.normal;
+    }
+  }
+  return "";
 }
 
-.preview-section-title {
-  font-weight: 700;
-  color: #e5e7eb;
-  margin-bottom: 8px;
-  padding-bottom: 4px;
-  border-bottom: 1px solid #374151;
+function convertScryfallCard(data) {
+  const producedMana =
+    Array.isArray(data.produced_mana) ? data.produced_mana :
+    Array.isArray(data.color_identity) ? data.color_identity :
+    [];
+
+  return {
+    name: data.name,
+    type: String(data.type_line || "").toLowerCase(),
+    rawType: String(data.type_line || ""),
+    text: String(data.oracle_text || "").toLowerCase(),
+    rawText: String(data.oracle_text || ""),
+    cmc: Number(data.cmc || 0),
+    colors: Array.isArray(data.color_identity) ? data.color_identity : [],
+    layout: String(data.layout || "").toLowerCase(),
+    legalities: data.legalities || {},
+    producedMana,
+    imageUrl: pickCommanderImage(data),
+    manaCost: String(data.mana_cost || ""),
+    scryfallUrl: data.scryfall_uri || "",
+    raw: data
+  };
 }
 
-.preview-line {
-  font-family: Consolas, Monaco, monospace;
-  font-size: 13px;
-  line-height: 1.5;
-  margin-bottom: 8px;
-  word-break: break-word;
+async function getCommander(name) {
+  const response = await fetch(`${SCRYFALL_NAMED}${encodeURIComponent(name)}`);
+  if (!response.ok) return null;
+  const data = await response.json();
+  return convertScryfallCard(data);
 }
 
-.preview-qty {
-  color: #cbd5e1;
-  display: inline-block;
-  min-width: 28px;
+async function getEDHREC(commanderName) {
+  const slug = toEdhrecSlug(commanderName);
+  const response = await fetch(`${EDHREC_BASE}${slug}.json`);
+  if (!response.ok) throw new Error("Failed to fetch EDHREC commander data.");
+
+  const data = await response.json();
+  const cardlists = data?.container?.json_dict?.cardlists;
+  if (!Array.isArray(cardlists)) throw new Error("Unexpected EDHREC response format.");
+
+  const deduped = new Map();
+
+  for (const section of cardlists) {
+    const cards = Array.isArray(section.cardviews) ? section.cardviews : [];
+    for (const card of cards) {
+      if (!card?.name) continue;
+      const key = normalizeCardName(card.name);
+      if (!deduped.has(key)) {
+        deduped.set(key, {
+          name: card.name,
+          synergy: Number(card.synergy || 0),
+          decks: Number(card.num_decks || 0),
+          label: section.header || ""
+        });
+      }
+    }
+  }
+
+  return Array.from(deduped.values());
 }
 
-.reason-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
-  margin-left: 32px;
-}
+async function fetchCardDataBatchWithProgress(cardNames, progressCallback) {
+  const uniqueNames = Array.from(new Set(cardNames.map(normalizeCardName)));
+  const missingNames = uniqueNames.filter((name) => !cardCache.has(name));
+  const total = missingNames.length;
+  let done = 0;
 
-.reason-badge {
-  font-size: 11px;
-  padding: 3px 7px;
-  border-radius: 999px;
-  background: #1f2937;
-  border: 1px solid #374151;
-  color: #cbd5e1;
-}
-
-.commander-column {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.commander-image-wrap {
-  position: relative;
-  width: 100%;
-  min-height: 446px;
-}
-
-.commander-image {
-  width: 100%;
-  border-radius: 16px;
-  border: 1px solid #374151;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  position: relative;
-  z-index: 2;
-}
-
-.commander-image-skeleton {
-  position: absolute;
-  inset: 0;
-  border-radius: 16px;
-  border: 1px solid #374151;
-  background:
-    linear-gradient(
-      90deg,
-      #111827 0%,
-      #1f2937 35%,
-      #374151 50%,
-      #1f2937 65%,
-      #111827 100%
+  if (total === 0) {
+    if (progressCallback) progressCallback(0, 0);
+    return new Map(
+      uniqueNames
+        .map((name) => [name, cardCache.get(name)])
+        .filter(([, value]) => value)
     );
-  background-size: 300% 100%;
-  animation: shimmer 1.5s infinite linear;
-  z-index: 1;
-}
-
-@keyframes shimmer {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
-}
-
-.commander-meta {
-  color: #cbd5e1;
-  white-space: pre-line;
-  font-size: 14px;
-}
-
-.color-pips {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.color-pip {
-  width: 28px;
-  height: 28px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 13px;
-  border: 1px solid rgba(255,255,255,0.16);
-  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.18);
-}
-
-.pip-W { background: #f4f1d0; color: #111827; }
-.pip-U { background: #7fb7ff; color: #111827; }
-.pip-B { background: #3b3b46; color: #f9fafb; }
-.pip-R { background: #f58a72; color: #111827; }
-.pip-G { background: #72b47d; color: #111827; }
-.pip-C { background: #c9ced6; color: #111827; }
-
-.themes-heading {
-  margin-top: 6px;
-  margin-bottom: 0;
-}
-
-.toast {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  background: #111827;
-  color: #f3f4f6;
-  border: 1px solid #374151;
-  border-radius: 999px;
-  padding: 10px 14px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
-  z-index: 9999;
-}
-
-@media (max-width: 900px) {
-  .results-grid {
-    grid-template-columns: 1fr;
   }
 
-  .commander-image-wrap {
-    min-height: 360px;
+  const chunkSize = 75;
+
+  for (let i = 0; i < missingNames.length; i += chunkSize) {
+    const chunk = missingNames.slice(i, i + chunkSize);
+    const identifiers = chunk.map((name) => ({ name }));
+
+    const response = await fetch(SCRYFALL_COLLECTION, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifiers })
+    });
+
+    if (!response.ok) throw new Error("Scryfall collection request failed.");
+
+    const data = await response.json();
+    const returnedCards = Array.isArray(data.data) ? data.data : [];
+
+    for (const rawCard of returnedCards) {
+      const converted = convertScryfallCard(rawCard);
+      cardCache.set(normalizeCardName(converted.name), converted);
+    }
+
+    for (const requestedName of chunk) {
+      if (!cardCache.has(requestedName)) cardCache.set(requestedName, null);
+    }
+
+    done += chunk.length;
+    if (progressCallback) progressCallback(done, total);
+    await sleep(80);
+  }
+
+  const results = new Map();
+  for (const name of uniqueNames) {
+    const cached = cardCache.get(name);
+    if (cached) results.set(name, cached);
+  }
+
+  return results;
+}
+
+function canBeCommander(card) {
+  const type = card.type;
+  const text = card.text;
+  if (type.includes("legendary creature")) return true;
+  if (text.includes("can be your commander")) return true;
+  return false;
+}
+
+function detectTribalThemes(cards) {
+  const counts = {};
+  for (const tribalType of TRIBAL_TYPES) counts[tribalType] = 0;
+
+  for (const card of cards) {
+    if (!card) continue;
+    const combined = `${card.type} ${card.text}`;
+
+    for (const tribalType of TRIBAL_TYPES) {
+      const pattern = new RegExp(`\\b${tribalType}\\b`, "g");
+      const matches = combined.match(pattern);
+      if (matches) counts[tribalType] += matches.length;
+    }
+  }
+
+  return Object.entries(counts)
+    .filter(([, count]) => count >= 3)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .map(([tribe]) => `${tribe} tribal`);
+}
+
+async function detectCommanderThemes(edhrecCards, collectionData, allOwnedCardData, commanderColors) {
+  const topSynergy = [...edhrecCards]
+    .sort((a, b) => b.synergy - a.synergy)
+    .slice(0, 36);
+
+  const edhrecCardMap = await fetchCardDataBatchWithProgress(topSynergy.map((c) => c.name));
+  const themeCards = [];
+
+  for (const entry of topSynergy) {
+    const card = edhrecCardMap.get(normalizeCardName(entry.name));
+    if (card) themeCards.push(card);
+  }
+
+  const ownedThemeCandidates = [];
+  const seenOwned = new Set();
+
+  for (const entry of collectionData.originals) {
+    if (ownedThemeCandidates.length >= 80) break;
+    if (seenOwned.has(entry.normalizedName)) continue;
+    seenOwned.add(entry.normalizedName);
+
+    const card = allOwnedCardData.get(entry.normalizedName);
+    if (!card) continue;
+    if (!legalForCommander(card.colors, commanderColors)) continue;
+
+    if (
+      card.type.includes("creature") ||
+      card.text.includes("token") ||
+      card.text.includes("sacrifice") ||
+      card.text.includes("+1/+1 counter") ||
+      card.text.includes("draw") ||
+      card.text.includes("graveyard") ||
+      card.text.includes("whenever")
+    ) {
+      ownedThemeCandidates.push(card);
+    }
+  }
+
+  const combinedCards = [...themeCards, ...ownedThemeCandidates];
+
+  const themeCounts = {
+    "group hug": 0,
+    counters: 0,
+    cantrips: 0,
+    wheels: 0,
+    "opponent draw": 0,
+    graveyard: 0,
+    tokens: 0,
+    artifacts: 0,
+    enchantments: 0,
+    lands: 0,
+    spellslinger: 0,
+    sacrifice: 0,
+    countersMatter: 0,
+    lifegain: 0,
+    reanimator: 0,
+    blink: 0,
+    goWide: 0,
+    voltron: 0
+  };
+
+  for (const card of combinedCards) {
+    const text = card.text;
+    const type = card.type;
+
+    if (text.includes("each player draws") || text.includes("each opponent draws")) {
+      themeCounts["group hug"] += 3;
+      themeCounts["opponent draw"] += 2;
+    }
+
+    if (
+      text.includes("target opponent draws") ||
+      text.includes("an opponent draws") ||
+      text.includes("that player draws")
+    ) {
+      themeCounts["group hug"] += 2;
+      themeCounts["opponent draw"] += 3;
+    }
+
+    if (
+      text.includes("draw a card") &&
+      (type.includes("instant") || type.includes("sorcery")) &&
+      card.cmc <= 2
+    ) {
+      themeCounts.cantrips += 3;
+      themeCounts.spellslinger += 1;
+    }
+
+    if (
+      text.includes("each player discards") ||
+      text.includes("then draws") ||
+      text.includes("discard their hand") ||
+      text.includes("wheel")
+    ) {
+      themeCounts.wheels += 3;
+    }
+
+    if (
+      text.includes("+1/+1 counter") ||
+      text.includes("put a counter on") ||
+      text.includes("put counters on")
+    ) {
+      themeCounts.counters += 3;
+      themeCounts.countersMatter += 2;
+    }
+
+    if (text.includes("proliferate") || text.includes("double the number of")) {
+      themeCounts.counters += 2;
+      themeCounts.countersMatter += 3;
+    }
+
+    if (text.includes("graveyard")) themeCounts.graveyard += 2;
+
+    if (text.includes("create") && text.includes("token")) {
+      themeCounts.tokens += 2;
+      themeCounts.goWide += 2;
+    }
+
+    if (type.includes("artifact")) themeCounts.artifacts += 1;
+    if (type.includes("enchantment")) themeCounts.enchantments += 1;
+    if (text.includes("landfall") || text.includes("search your library for a land")) themeCounts.lands += 2;
+    if (type.includes("instant") || type.includes("sorcery")) themeCounts.spellslinger += 1;
+    if (text.includes("sacrifice")) themeCounts.sacrifice += 3;
+    if (text.includes("gain life") || text.includes("life total")) themeCounts.lifegain += 2;
+
+    if (text.includes("return target creature card from your graveyard") || text.includes("reanimate")) {
+      themeCounts.reanimator += 3;
+    }
+
+    if (
+      text.includes("exile another target") ||
+      text.includes("return it to the battlefield") ||
+      text.includes("blink")
+    ) {
+      themeCounts.blink += 3;
+    }
+
+    if (
+      text.includes("equipped creature") ||
+      text.includes("enchanted creature") ||
+      text.includes("commander damage")
+    ) {
+      themeCounts.voltron += 2;
+    }
+  }
+
+  const normalThemes = Object.entries(themeCounts)
+    .sort((a, b) => b[1] - a[1])
+    .filter(([, count]) => count > 1)
+    .slice(0, 4)
+    .map(([theme]) => theme);
+
+  const tribalThemes = detectTribalThemes(combinedCards);
+  return [...normalThemes, ...tribalThemes].slice(0, 6);
+}
+
+function getCommanderStrategyProfile(commanderName, commanderThemes, commanderColors) {
+  const normalizedName = normalizeCardName(commanderName);
+
+  const profile = {
+    wantsCreatures: false,
+    wantsTokens: false,
+    wantsSacrifice: false,
+    wantsTribal: false,
+    tribalTypes: [],
+    wantsCantrips: false,
+    wantsCounters: false,
+    wantsGroupHug: false,
+    wantsGoWide: false,
+    monoColor: commanderColors.length === 1
+  };
+
+  if (commanderThemes.includes("tokens")) profile.wantsTokens = true;
+  if (commanderThemes.includes("sacrifice")) profile.wantsSacrifice = true;
+  if (commanderThemes.includes("goWide")) profile.wantsGoWide = true;
+  if (commanderThemes.includes("cantrips")) profile.wantsCantrips = true;
+  if (commanderThemes.includes("counters")) profile.wantsCounters = true;
+  if (commanderThemes.includes("group hug")) profile.wantsGroupHug = true;
+
+  const tribalThemes = commanderThemes.filter((t) => t.endsWith(" tribal"));
+  if (tribalThemes.length) {
+    profile.wantsTribal = true;
+    profile.wantsCreatures = true;
+    profile.tribalTypes = tribalThemes.map((t) => t.replace(" tribal", ""));
+  }
+
+  if (profile.wantsTokens || profile.wantsSacrifice || profile.wantsGoWide) {
+    profile.wantsCreatures = true;
+  }
+
+  if (normalizedName.includes("ib halfheart")) {
+    profile.wantsCreatures = true;
+    profile.wantsTokens = true;
+    profile.wantsSacrifice = true;
+    profile.wantsTribal = true;
+    profile.wantsGoWide = true;
+    if (!profile.tribalTypes.includes("goblin")) profile.tribalTypes.push("goblin");
+  }
+
+  return profile;
+}
+
+function getModePreferences(mode, strategyProfile) {
+  return {
+    mode,
+    synergyBias:
+      mode === "more-synergistic" ? 1.4 :
+      mode === "more-tribal" ? 1.25 :
+      mode === "balanced" ? 1 :
+      mode === "more-casual" ? 0.9 :
+      1,
+    creatureBias:
+      mode === "more-creatures" ? 1.6 :
+      mode === "more-tribal" ? 1.35 :
+      strategyProfile.wantsCreatures ? 1.1 : 1,
+    casualBias: mode === "more-casual" ? 1.4 : 1,
+    manaBaseBias: mode === "stronger-mana-base" ? 1.35 : 1,
+    fewerStaplesBias: mode === "fewer-staples" ? 1.5 : 1,
+    tribalBias: mode === "more-tribal" ? 1.5 : 1,
+    minimumCreatureBonus:
+      mode === "more-creatures" ? 8 :
+      mode === "more-tribal" ? 6 :
+      0
+  };
+}
+
+function isCreatureCard(card) {
+  return card.type.includes("creature");
+}
+
+function hasTribalType(card, tribe) {
+  const pattern = new RegExp(`\\b${tribe}\\b`);
+  return pattern.test(`${card.type} ${card.text}`);
+}
+
+function isTokenMaker(card) {
+  return card.text.includes("create") && card.text.includes("token");
+}
+
+function isSacrificeCard(card) {
+  return card.text.includes("sacrifice");
+}
+
+function isSynergisticMonoColorLand(card, commanderColors, profile) {
+  const name = normalizeCardName(card.name);
+  const text = card.text;
+
+  if (commanderColors.length !== 1) return true;
+
+  if (name === "path of ancestry" && profile.wantsTribal) return true;
+  if (name === "secluded courtyard" && profile.wantsTribal) return true;
+  if (name === "unclaimed territory" && profile.wantsTribal) return true;
+  if (name === "dwarven mine" && commanderColors[0] === "R") return true;
+  if (name === "mines of moria" && profile.wantsTokens) return true;
+  if (text.includes("create") && text.includes("token")) return true;
+  if (text.includes("sacrifice") || text.includes("whenever a creature dies")) return true;
+
+  return false;
+}
+
+function isLowPriorityMonoColorFixer(card, commanderColors) {
+  if (commanderColors.length !== 1) return false;
+
+  const name = normalizeCardName(card.name);
+  const lowPriorityNames = new Set([
+    "command tower",
+    "exotic orchard",
+    "rupture spire",
+    "gateway plaza",
+    "transguild promenade",
+    "unclaimed territory",
+    "secluded courtyard",
+    "path of ancestry",
+    "thriving bluff",
+    "public thoroughfare",
+    "vibrant cityscape",
+    "tendo ice bridge",
+    "uncharted haven",
+    "command bridge",
+    "crossroads village",
+    "capital city",
+    "gallifrey council chamber",
+    "opal palace",
+    "corrupted crossroads",
+    "cascading cataracts",
+    "secluded starforge"
+  ]);
+
+  return lowPriorityNames.has(name);
+}
+
+function isLowPriorityMonoColorRock(card, commanderColors, profile) {
+  if (commanderColors.length !== 1) return false;
+  if (!card.type.includes("artifact")) return false;
+
+  const name = normalizeCardName(card.name);
+  if (name === "arcane signet") return true;
+  if (name === "commander's sphere") return true;
+  if (name === "heraldic banner") return false;
+  if (name === "sol ring") return false;
+  if (name === "mind stone") return false;
+  if (name === "skullclamp") return false;
+  if (name === "idol of oblivion" && profile.wantsTokens) return false;
+
+  return false;
+}
+
+function isGenericStaple(card) {
+  const staples = new Set([
+    "sol ring",
+    "arcane signet",
+    "command tower",
+    "swiftfoot boots",
+    "skullclamp",
+    "swords to plowshares",
+    "path to exile",
+    "cyclonic rift",
+    "rhystic study",
+    "smothering tithe",
+    "demonic tutor",
+    "vampiric tutor",
+    "teferi's protection"
+  ]);
+  return staples.has(normalizeCardName(card.name));
+}
+
+function detectRole(card) {
+  const text = card.text;
+  const type = card.type;
+
+  if (type.includes("land")) return "land";
+
+  if (
+    text.includes("add {") ||
+    text.includes("create a treasure") ||
+    text.includes("create treasure") ||
+    text.includes("search your library for a land")
+  ) {
+    return "ramp";
+  }
+
+  if (
+    text.includes("draw a card") ||
+    text.includes("draw two cards") ||
+    text.includes("draw three cards") ||
+    text.includes("whenever you draw")
+  ) {
+    return "draw";
+  }
+
+  if (
+    text.includes("destroy target") ||
+    text.includes("exile target") ||
+    text.includes("counter target spell") ||
+    text.includes("return target permanent")
+  ) {
+    return "removal";
+  }
+
+  if (
+    text.includes("destroy all creatures") ||
+    text.includes("exile all creatures") ||
+    text.includes("each creature gets")
+  ) {
+    return "wipe";
+  }
+
+  return "synergy";
+}
+
+function detectCardTags(card) {
+  const tags = [];
+  const text = card.text;
+  const type = card.type;
+  const combined = `${type} ${text}`;
+
+  if (text.includes("graveyard")) tags.push("graveyard");
+  if (text.includes("token")) {
+    tags.push("tokens");
+    tags.push("goWide");
+  }
+  if (type.includes("artifact")) tags.push("artifacts");
+  if (type.includes("enchantment")) tags.push("enchantments");
+  if (text.includes("landfall") || text.includes("search your library for a land")) tags.push("lands");
+  if (type.includes("instant") || type.includes("sorcery")) tags.push("spellslinger");
+  if (text.includes("sacrifice")) tags.push("sacrifice");
+
+  if (text.includes("+1/+1 counter") || text.includes("put a counter on") || text.includes("put counters on")) {
+    tags.push("counters");
+    tags.push("countersMatter");
+  }
+
+  if (text.includes("gain life") || text.includes("life total")) tags.push("lifegain");
+  if (text.includes("return target creature card from your graveyard")) tags.push("reanimator");
+
+  if (
+    text.includes("each player draws") ||
+    text.includes("each opponent draws") ||
+    text.includes("target opponent draws") ||
+    text.includes("an opponent draws")
+  ) {
+    tags.push("group hug");
+    tags.push("opponent draw");
+  }
+
+  if (
+    text.includes("draw a card") &&
+    (type.includes("instant") || type.includes("sorcery")) &&
+    card.cmc <= 2
+  ) {
+    tags.push("cantrips");
+  }
+
+  if (
+    text.includes("each player discards") ||
+    text.includes("then draws") ||
+    text.includes("discard their hand")
+  ) {
+    tags.push("wheels");
+  }
+
+  if (
+    text.includes("exile another target") ||
+    text.includes("return it to the battlefield")
+  ) {
+    tags.push("blink");
+  }
+
+  for (const tribalType of TRIBAL_TYPES) {
+    const pattern = new RegExp(`\\b${tribalType}\\b`);
+    if (pattern.test(combined)) tags.push(`${tribalType} tribal`);
+  }
+
+  return tags;
+}
+
+function scoreCard(card, edhrecCard, commanderThemes, strategyProfile, commanderColors, modePrefs) {
+  const synergyScore = Number(edhrecCard.synergy || 0) * 6;
+  const popularityScore = Math.min(Number(edhrecCard.decks || 0) / 1200, 18);
+
+  let roleBonus = 0;
+  const role = detectRole(card);
+
+  if (role === "ramp") roleBonus = 4;
+  else if (role === "draw") roleBonus = 4;
+  else if (role === "removal") roleBonus = 4;
+  else if (role === "wipe") roleBonus = 3;
+
+  let curveBonus = 0;
+  if (card.cmc <= 2) curveBonus = 3;
+  else if (card.cmc <= 4) curveBonus = 4;
+  else if (card.cmc <= 6) curveBonus = 1;
+
+  const tags = detectCardTags(card);
+  let themeBonus = 0;
+
+  for (const tag of tags) {
+    if (commanderThemes.includes(tag)) themeBonus += 5;
+  }
+
+  if (strategyProfile.wantsCreatures && isCreatureCard(card)) themeBonus += 5 * modePrefs.creatureBias;
+  if (strategyProfile.wantsTokens && isTokenMaker(card)) themeBonus += 7 * modePrefs.synergyBias;
+  if (strategyProfile.wantsSacrifice && isSacrificeCard(card)) themeBonus += 6 * modePrefs.synergyBias;
+  if (strategyProfile.wantsGoWide && isCreatureCard(card)) themeBonus += 3 * modePrefs.creatureBias;
+
+  if (strategyProfile.wantsTribal) {
+    for (const tribe of strategyProfile.tribalTypes) {
+      if (hasTribalType(card, tribe)) themeBonus += 10 * modePrefs.tribalBias;
+    }
+  }
+
+  if (commanderThemes.includes("group hug") && tags.includes("opponent draw")) themeBonus += 4;
+  if (commanderThemes.includes("counters") && tags.includes("counters")) themeBonus += 4;
+  if (commanderThemes.includes("cantrips") && tags.includes("cantrips")) themeBonus += 3;
+
+  let penalty = 0;
+  if (isLowPriorityMonoColorRock(card, commanderColors, strategyProfile)) penalty += 8;
+  if (modePrefs.casualBias > 1 && GAME_CHANGERS.has(normalizeCardName(card.name))) penalty += 10 * modePrefs.casualBias;
+  if (modePrefs.fewerStaplesBias > 1 && isGenericStaple(card)) penalty += 6 * modePrefs.fewerStaplesBias;
+
+  return synergyScore * modePrefs.synergyBias + popularityScore + roleBonus + curveBonus + themeBonus - penalty;
+}
+
+function scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColors, modePrefs) {
+  let score = 5;
+
+  const role = detectRole(card);
+  if (role === "ramp") score += 4;
+  else if (role === "draw") score += 4;
+  else if (role === "removal") score += 4;
+  else if (role === "wipe") score += 3;
+
+  if (card.cmc <= 2) score += 3;
+  else if (card.cmc <= 4) score += 4;
+  else if (card.cmc <= 6) score += 1;
+
+  const tags = detectCardTags(card);
+  for (const tag of tags) {
+    if (commanderThemes.includes(tag)) score += 4 * modePrefs.synergyBias;
+  }
+
+  if (strategyProfile.wantsCreatures && isCreatureCard(card)) score += 6 * modePrefs.creatureBias;
+  if (strategyProfile.wantsTokens && isTokenMaker(card)) score += 8 * modePrefs.synergyBias;
+  if (strategyProfile.wantsSacrifice && isSacrificeCard(card)) score += 7 * modePrefs.synergyBias;
+  if (strategyProfile.wantsGoWide && isCreatureCard(card)) score += 3 * modePrefs.creatureBias;
+
+  if (strategyProfile.wantsTribal) {
+    for (const tribe of strategyProfile.tribalTypes) {
+      if (hasTribalType(card, tribe)) score += 12 * modePrefs.tribalBias;
+    }
+  }
+
+  if (isLowPriorityMonoColorRock(card, commanderColors, strategyProfile)) score -= 8;
+  if (modePrefs.casualBias > 1 && GAME_CHANGERS.has(normalizeCardName(card.name))) score -= 10 * modePrefs.casualBias;
+  if (modePrefs.fewerStaplesBias > 1 && isGenericStaple(card)) score -= 6 * modePrefs.fewerStaplesBias;
+
+  return score;
+}
+
+function legalForCommander(cardColors, commanderColors) {
+  for (const color of cardColors) {
+    if (!commanderColors.includes(color)) return false;
+  }
+  return true;
+}
+
+function recommendLandCount(commanderColors) {
+  if (commanderColors.length === 0) return 38;
+  if (commanderColors.length === 1) return 36;
+  if (commanderColors.length === 2) return 37;
+  return 38;
+}
+
+function evaluateNonbasicLand(card, commanderColors, strategyProfile, modePrefs) {
+  if (!card.type.includes("land")) return null;
+  if (isBasicLand(card.name)) return null;
+
+  const produced = Array.isArray(card.producedMana) ? card.producedMana : [];
+  const relevantProduced = produced.filter((c) => commanderColors.includes(c));
+  const normalizedName = normalizeCardName(card.name);
+  const text = card.text;
+
+  let score = 0;
+  score += relevantProduced.length * 4;
+
+  if (normalizedName === "command tower") score += 10;
+  if (normalizedName === "exotic orchard") score += 7;
+  if (normalizedName === "path of ancestry" && strategyProfile.wantsTribal) score += 9;
+  if (normalizedName === "secluded courtyard" && strategyProfile.wantsTribal) score += 8;
+  if (normalizedName === "unclaimed territory" && strategyProfile.wantsTribal) score += 8;
+
+  if (card.name.toLowerCase().includes("triome")) score += 8;
+  if (card.name.toLowerCase().includes("pathway")) score += 6;
+
+  if (text.includes("add one mana of any color")) score += 6;
+  if (text.includes("add one mana of any type")) score += 5;
+
+  if (strategyProfile.wantsTokens && text.includes("create") && text.includes("token")) score += 5;
+  if (strategyProfile.wantsSacrifice && text.includes("sacrifice")) score += 4;
+  if (strategyProfile.wantsGoWide && text.includes("creature")) score += 2;
+
+  if (text.includes("enters tapped")) score -= 4;
+  if (text.includes("unless you control")) score -= 1;
+  if (text.includes("pay 1 life")) score -= 0.5;
+  if (relevantProduced.length === 0) score -= 20;
+
+  if (strategyProfile.monoColor) {
+    if (!isSynergisticMonoColorLand(card, commanderColors, strategyProfile)) score -= 12;
+    if (isLowPriorityMonoColorFixer(card, commanderColors)) score -= 12;
+  }
+
+  score *= modePrefs.manaBaseBias;
+
+  return {
+    name: card.name,
+    role: "land",
+    score,
+    type: card.type,
+    cmc: 0,
+    colors: produced,
+    source: "nonbasic-land"
+  };
+}
+
+function buildNonbasicManaBase(collectionData, allOwnedCardData, commanderColors, targetLandCount, strategyProfile, modePrefs) {
+  const landPool = [];
+  const seen = new Set();
+
+  for (const entry of collectionData.originals) {
+    const normalizedName = entry.normalizedName;
+    if (seen.has(normalizedName)) continue;
+    seen.add(normalizedName);
+
+    const card = allOwnedCardData.get(normalizedName);
+    if (!card) continue;
+    if (!card.type.includes("land")) continue;
+    if (isBasicLand(card.name)) continue;
+    if (!legalForCommander(card.colors, commanderColors)) continue;
+
+    const landCandidate = evaluateNonbasicLand(card, commanderColors, strategyProfile, modePrefs);
+    if (!landCandidate) continue;
+    landPool.push(landCandidate);
+  }
+
+  landPool.sort((a, b) => b.score - a.score);
+
+  const threshold =
+    commanderColors.length === 1 ? 7 :
+    commanderColors.length === 2 ? 6 :
+    commanderColors.length === 3 ? 5 :
+    4;
+
+  const filtered = landPool.filter((land) => land.score >= threshold);
+
+  const maxNonbasicCount =
+    commanderColors.length === 1 ? Math.min(6, targetLandCount) :
+    commanderColors.length === 2 ? Math.min(modePrefs.manaBaseBias > 1 ? 15 : 12, targetLandCount) :
+    commanderColors.length === 3 ? Math.min(modePrefs.manaBaseBias > 1 ? 18 : 16, targetLandCount) :
+    Math.min(modePrefs.manaBaseBias > 1 ? 22 : 20, targetLandCount);
+
+  return filtered.slice(0, maxNonbasicCount);
+}
+
+function buildBasicManaBase(commanderColors, landCountNeeded, selectedNonbasics = []) {
+  if (landCountNeeded <= 0) return [];
+
+  if (commanderColors.length === 0) {
+    return Array.from({ length: landCountNeeded }, () => ({
+      name: "Wastes",
+      role: "land",
+      score: 0,
+      type: "basic land",
+      cmc: 0,
+      colors: [],
+      source: "basic-land"
+    }));
+  }
+
+  const sourceCounts = {};
+  for (const color of commanderColors) sourceCounts[color] = 0;
+
+  for (const land of selectedNonbasics) {
+    const produced = Array.isArray(land.colors) ? land.colors : [];
+    for (const color of produced) {
+      if (sourceCounts[color] !== undefined) sourceCounts[color] += 1;
+    }
+  }
+
+  const lands = [];
+  const colorsSorted = [...commanderColors].sort((a, b) => sourceCounts[a] - sourceCounts[b]);
+
+  for (let i = 0; i < landCountNeeded; i++) {
+    colorsSorted.sort((a, b) => sourceCounts[a] - sourceCounts[b]);
+    const color = colorsSorted[0];
+    sourceCounts[color] += 1;
+
+    lands.push({
+      name: COLOR_TO_BASIC[color],
+      role: "land",
+      score: 0,
+      type: "basic land",
+      cmc: 0,
+      colors: [color],
+      source: "basic-land"
+    });
+  }
+
+  return lands;
+}
+
+function buildDeckFromScoredPool(
+  scoredNonlands,
+  commanderColors,
+  collectionData,
+  allOwnedCardData,
+  commanderThemes,
+  commanderName,
+  modePrefs
+) {
+  const deck = [];
+  const usedNames = new Set();
+  const normalizedCommander = normalizeCardName(commanderName);
+  const strategyProfile = getCommanderStrategyProfile(commanderName, commanderThemes, commanderColors);
+
+  const targetLandCount = recommendLandCount(commanderColors);
+  const targetNonlandCount = 99 - targetLandCount;
+
+  const targets = {
+    ramp: 10,
+    draw: 10,
+    removal: 8,
+    wipe: 3
+  };
+
+  const minimumCreatureCount = strategyProfile.wantsCreatures
+    ? (strategyProfile.wantsTribal || strategyProfile.wantsGoWide ? 24 : 18) + modePrefs.minimumCreatureBonus
+    : 10 + Math.floor(modePrefs.minimumCreatureBonus / 2);
+
+  const byRole = {
+    ramp: [],
+    draw: [],
+    removal: [],
+    wipe: [],
+    synergy: []
+  };
+
+  for (const card of scoredNonlands) {
+    if (byRole[card.role]) byRole[card.role].push(card);
+    else byRole.synergy.push(card);
+  }
+
+  for (const role of Object.keys(byRole)) {
+    byRole[role].sort((a, b) => b.score - a.score);
+  }
+
+  for (const [role, count] of Object.entries(targets)) {
+    let addedForRole = 0;
+
+    for (const card of byRole[role]) {
+      if (deck.length >= targetNonlandCount) break;
+
+      const key = normalizeCardName(card.name);
+      if (usedNames.has(key) || key === normalizedCommander) continue;
+
+      deck.push({ ...card, source: "edhrec" });
+      usedNames.add(key);
+      addedForRole += 1;
+
+      if (addedForRole >= count) break;
+    }
+  }
+
+  const rankedEdhrecPool = [
+    ...byRole.synergy,
+    ...byRole.ramp,
+    ...byRole.draw,
+    ...byRole.removal,
+    ...byRole.wipe
+  ].sort((a, b) => b.score - a.score);
+
+  for (const card of rankedEdhrecPool) {
+    if (deck.length >= targetNonlandCount) break;
+
+    const key = normalizeCardName(card.name);
+    if (usedNames.has(key) || key === normalizedCommander) continue;
+
+    deck.push({ ...card, source: "edhrec" });
+    usedNames.add(key);
+  }
+
+  const currentCreatureCount = () => deck.filter((c) => c.type.includes("creature")).length;
+
+  if (currentCreatureCount() < minimumCreatureCount) {
+    const creatureFallbackPool = [];
+    const seenCreatures = new Set();
+
+    for (const entry of collectionData.originals) {
+      const normalizedName = entry.normalizedName;
+      if (seenCreatures.has(normalizedName)) continue;
+      seenCreatures.add(normalizedName);
+
+      if (normalizedName === normalizedCommander || usedNames.has(normalizedName)) continue;
+
+      const card = allOwnedCardData.get(normalizedName);
+      if (!card) continue;
+      if (!card.type.includes("creature")) continue;
+      if (!legalForCommander(card.colors, commanderColors)) continue;
+
+      creatureFallbackPool.push({
+        name: card.name,
+        role: detectRole(card),
+        score: scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColors, modePrefs) + 10,
+        type: card.type,
+        cmc: card.cmc,
+        colors: card.colors
+      });
+    }
+
+    creatureFallbackPool.sort((a, b) => b.score - a.score);
+
+    for (const card of creatureFallbackPool) {
+      if (currentCreatureCount() >= minimumCreatureCount) break;
+      if (deck.length >= targetNonlandCount) break;
+
+      const key = normalizeCardName(card.name);
+      if (usedNames.has(key)) continue;
+
+      deck.push({ ...card, source: "fallback-creature" });
+      usedNames.add(key);
+    }
+  }
+
+  if (deck.length < targetNonlandCount) {
+    const fallbackPool = [];
+    const seenFallback = new Set();
+
+    for (const entry of collectionData.originals) {
+      const normalizedName = entry.normalizedName;
+      if (seenFallback.has(normalizedName)) continue;
+      seenFallback.add(normalizedName);
+
+      if (normalizedName === normalizedCommander || usedNames.has(normalizedName)) continue;
+
+      const card = allOwnedCardData.get(normalizedName);
+      if (!card) continue;
+      if (card.type.includes("land")) continue;
+      if (!legalForCommander(card.colors, commanderColors)) continue;
+
+      fallbackPool.push({
+        name: card.name,
+        role: detectRole(card),
+        score: scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColors, modePrefs),
+        type: card.type,
+        cmc: card.cmc,
+        colors: card.colors
+      });
+    }
+
+    fallbackPool.sort((a, b) => b.score - a.score);
+
+    for (const card of fallbackPool) {
+      if (deck.length >= targetNonlandCount) break;
+
+      const key = normalizeCardName(card.name);
+      if (usedNames.has(key) || key === normalizedCommander) continue;
+
+      deck.push({ ...card, source: "fallback" });
+      usedNames.add(key);
+    }
+  }
+
+  const selectedNonbasicLands = buildNonbasicManaBase(
+    collectionData,
+    allOwnedCardData,
+    commanderColors,
+    targetLandCount,
+    strategyProfile,
+    modePrefs
+  );
+
+  let remainingLandCount = targetLandCount - selectedNonbasicLands.length;
+  if (remainingLandCount < 0) remainingLandCount = 0;
+
+  const basicLands = buildBasicManaBase(
+    commanderColors,
+    remainingLandCount,
+    selectedNonbasicLands
+  );
+
+  let finalDeck = [...deck, ...selectedNonbasicLands, ...basicLands];
+
+  while (finalDeck.length < 99) {
+    const extra = buildBasicManaBase(
+      commanderColors,
+      1,
+      finalDeck.filter((c) => c.role === "land")
+    );
+    finalDeck.push(...extra);
+  }
+
+  if (finalDeck.length > 99) {
+    finalDeck = finalDeck.slice(0, 99);
+  }
+
+  return finalDeck;
+}
+
+function mergeDeckCounts(deck) {
+  const map = new Map();
+
+  for (const card of deck) {
+    const key = normalizeCardName(card.name);
+    if (!map.has(key)) {
+      map.set(key, {
+        name: card.name,
+        count: 1,
+        type: card.type,
+        role: card.role,
+        source: card.source,
+        reasons: card.reasons || []
+      });
+    } else {
+      const existing = map.get(key);
+      existing.count += 1;
+      existing.reasons = Array.from(new Set([...(existing.reasons || []), ...(card.reasons || [])]));
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function getCardSection(cardType) {
+  const type = String(cardType || "").toLowerCase();
+  if (type.includes("creature")) return "Creatures";
+  if (type.includes("artifact")) return "Artifacts";
+  if (type.includes("enchantment")) return "Enchantments";
+  if (type.includes("planeswalker")) return "Planeswalkers";
+  if (type.includes("instant")) return "Instants";
+  if (type.includes("sorcery")) return "Sorceries";
+  if (type.includes("land")) return "Lands";
+  return "Other";
+}
+
+function generateCardReasons(card, commanderThemes, strategyProfile, commanderColors) {
+  const reasons = [];
+  const tags = detectCardTags(card);
+  const role = detectRole(card);
+
+  if (role === "ramp") reasons.push("ramp");
+  if (role === "draw") reasons.push("draw");
+  if (role === "removal") reasons.push("removal");
+  if (role === "wipe") reasons.push("wipe");
+  if (isTokenMaker(card)) reasons.push("token maker");
+  if (isSacrificeCard(card)) reasons.push("sac outlet");
+  if (GAME_CHANGERS.has(normalizeCardName(card.name))) reasons.push("game changer");
+
+  for (const theme of commanderThemes) {
+    if (tags.includes(theme)) reasons.push(theme);
+  }
+
+  if (strategyProfile.wantsTribal) {
+    for (const tribe of strategyProfile.tribalTypes) {
+      if (hasTribalType(card, tribe)) reasons.push(`${tribe} tribal`);
+    }
+  }
+
+  if (card.role === "land") {
+    if (card.source === "basic-land") reasons.push("basic fixing");
+    if (card.source === "nonbasic-land") reasons.push("mana land");
+  }
+
+  if (card.source === "edhrec") reasons.push("edhrec match");
+  if (card.source === "fallback") reasons.push("collection fallback");
+  if (card.source === "fallback-creature") reasons.push("creature fallback");
+
+  return Array.from(new Set(reasons)).slice(0, 5);
+}
+
+function displayThemeChips(themes) {
+  const wrap = document.getElementById("themeChips");
+  wrap.innerHTML = "";
+
+  if (!themes.length) {
+    const chip = document.createElement("div");
+    chip.className = "theme-chip theme-chip-muted";
+    chip.textContent = "No Clear Themes";
+    wrap.appendChild(chip);
+    return;
+  }
+
+  themes.forEach((theme) => {
+    const chip = document.createElement("div");
+    chip.className = "theme-chip";
+    chip.textContent = formatThemeLabel(theme);
+    wrap.appendChild(chip);
+  });
+}
+
+function displayThemes(themes) {
+  displayThemeChips(themes);
+}
+
+function displayDeckSummary(deck, commanderName, commanderColors) {
+  const summary = document.getElementById("deckSummary");
+
+  const nonlands = deck.filter((c) => c.role !== "land").length;
+  const lands = deck.filter((c) => c.role === "land").length;
+  const creatures = deck.filter((c) => c.type.includes("creature")).length;
+  const colorText = commanderColors.length ? commanderColors.join("") : "Colorless";
+
+  summary.textContent =
+    `Commander: ${commanderName}
+Color Identity: ${colorText}
+Total Cards: ${deck.length}
+Creatures: ${creatures}
+Nonlands: ${nonlands}
+Lands: ${lands}`;
+}
+
+function getBracketLabel(bracket) {
+  const labels = {
+    1: "Bracket 1 — Exhibition",
+    2: "Bracket 2 — Core",
+    3: "Bracket 3 — Upgraded",
+    4: "Bracket 4 — Optimized",
+    5: "Bracket 5 — cEDH"
+  };
+  return labels[bracket] || "Unknown";
+}
+
+function detectGameChangers(deck, commanderName) {
+  const detected = [];
+  const seen = new Set();
+
+  const allNames = [commanderName, ...deck.map((c) => c.name)];
+  for (const name of allNames) {
+    const normalized = normalizeCardName(name);
+    if (GAME_CHANGERS.has(normalized) && !seen.has(normalized)) {
+      detected.push(name);
+      seen.add(normalized);
+    }
+  }
+
+  return detected.sort((a, b) => a.localeCompare(b));
+}
+
+function estimateDeckBracket(deck, commanderThemes, commanderColors, commanderName) {
+  const names = deck.map((c) => normalizeCardName(c.name));
+  const nonlands = deck.filter((c) => c.role !== "land");
+  const lands = deck.filter((c) => c.role === "land");
+  const creatures = nonlands.filter((c) => c.type.includes("creature")).length;
+
+  const rampCount = nonlands.filter((c) => c.role === "ramp").length;
+  const drawCount = nonlands.filter((c) => c.role === "draw").length;
+  const removalCount = nonlands.filter((c) => c.role === "removal").length;
+  const wipeCount = nonlands.filter((c) => c.role === "wipe").length;
+
+  const avgCmc =
+    nonlands.length > 0
+      ? nonlands.reduce((sum, c) => sum + (c.cmc || 0), 0) / nonlands.length
+      : 0;
+
+  const fastManaCards = [
+    "sol ring", "mana crypt", "chrome mox", "mox diamond", "jeweled lotus", "mana vault", "grim monolith", "lotus petal"
+  ];
+
+  const tutorCards = [
+    "demonic tutor", "vampiric tutor", "imperial seal", "worldly tutor", "enlightened tutor",
+    "mystical tutor", "gamble", "diabolic intent", "eladamri's call", "green sun's zenith",
+    "finale of devastation", "crop rotation"
+  ];
+
+  const extraTurnCards = [
+    "time warp", "temporal manipulation", "capture of jingzhou", "nexus of fate", "time stretch", "expropriate"
+  ];
+
+  const massLandDenialCards = [
+    "armageddon", "ravages of war", "ruination", "winter orb", "blood moon", "magus of the moon", "sunder"
+  ];
+
+  const compactComboCards = [
+    "thassa's oracle", "underworld breach", "ad nauseam", "protean hulk", "bolas's citadel", "dockside extortionist", "food chain"
+  ];
+
+  const fastManaCount = names.filter((n) => fastManaCards.includes(n)).length;
+  const tutorCount = names.filter((n) => tutorCards.includes(n)).length;
+  const extraTurnCount = names.filter((n) => extraTurnCards.includes(n)).length;
+  const massLandDenialCount = names.filter((n) => massLandDenialCards.includes(n)).length;
+  const compactComboCount = names.filter((n) => compactComboCards.includes(n)).length;
+  const gameChangers = detectGameChangers(deck, commanderName);
+  const gameChangerCount = gameChangers.length;
+
+  let score = 0;
+  score += rampCount * 0.25;
+  score += drawCount * 0.2;
+  score += removalCount * 0.15;
+  score += wipeCount * 0.2;
+
+  if (avgCmc <= 2.2) score += 2.5;
+  else if (avgCmc <= 2.8) score += 1.5;
+  else if (avgCmc <= 3.3) score += 0.5;
+
+  score += fastManaCount * 2.5;
+  score += tutorCount * 1.75;
+  score += extraTurnCount * 1.5;
+  score += massLandDenialCount * 2;
+  score += compactComboCount * 2.5;
+  score += gameChangerCount * 1.2;
+
+  if (commanderThemes.includes("tokens")) score += 0.4;
+  if (commanderThemes.includes("sacrifice")) score += 0.4;
+  if (commanderThemes.includes("cantrips")) score += 0.6;
+  if (commanderThemes.includes("counters")) score += 0.3;
+  if (commanderThemes.some((t) => t.endsWith(" tribal"))) score += 0.3;
+
+  if (commanderColors.length >= 3) score += 0.3;
+  if (creatures >= 24) score -= 0.3;
+  if (lands >= 37) score -= 0.2;
+
+  let bracket = 2;
+  if (score < 1.5) bracket = 1;
+  else if (score < 4.5) bracket = 2;
+  else if (score < 8.5) bracket = 3;
+  else if (score < 13) bracket = 4;
+  else bracket = 5;
+
+  if (gameChangerCount > 0 && bracket < 3) bracket = 3;
+  if (gameChangerCount > 3 && bracket < 4) bracket = 4;
+
+  const reasons = [];
+  if (gameChangerCount) reasons.push(`game changers: ${gameChangerCount}`);
+  if (fastManaCount) reasons.push(`fast mana: ${fastManaCount}`);
+  if (tutorCount) reasons.push(`tutors: ${tutorCount}`);
+  if (compactComboCount) reasons.push(`combo pieces: ${compactComboCount}`);
+  if (extraTurnCount) reasons.push(`extra turns: ${extraTurnCount}`);
+  if (massLandDenialCount) reasons.push(`mass land denial: ${massLandDenialCount}`);
+  reasons.push(`avg CMC: ${avgCmc.toFixed(2)}`);
+  reasons.push(`ramp/draw/removal/wipes: ${rampCount}/${drawCount}/${removalCount}/${wipeCount}`);
+
+  return {
+    bracket,
+    label: getBracketLabel(bracket),
+    score: Number(score.toFixed(2)),
+    reasons,
+    gameChangers
+  };
+}
+
+function displayDeckBracket(bracketInfo) {
+  const el = document.getElementById("deckBracket");
+  const badgeClass =
+    bracketInfo.bracket === 1 ? "badge-b1" :
+    bracketInfo.bracket === 2 ? "badge-b2" :
+    bracketInfo.bracket === 3 ? "badge-b3" :
+    bracketInfo.bracket === 4 ? "badge-b4" :
+    "badge-b5";
+
+  el.innerHTML = `
+    <div class="power-card fade-up">
+      <div class="power-card-copy">
+        <div class="power-card-label">Deck Bracket</div>
+        <div class="power-card-subtitle">A quick strength estimate based on your final list.</div>
+      </div>
+      <div class="badge ${badgeClass}">${escapeHtml(bracketInfo.label)}</div>
+    </div>
+  `;
+}
+
+function displayGameChangers(bracketInfo) {
+  const el = document.getElementById("deckGameChangers");
+  if (!bracketInfo.gameChangers.length) {
+    el.innerHTML = `
+      <div class="info-card fade-up">
+        <div class="info-card-title">Game Changers</div>
+        <div class="info-card-copy">None detected in this build.</div>
+      </div>
+    `;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="info-card fade-up">
+      <div class="info-card-title">Game Changers (${bracketInfo.gameChangers.length})</div>
+      <div class="info-card-copy">${escapeHtml(bracketInfo.gameChangers.join(", "))}</div>
+    </div>
+  `;
+}
+
+function displayBuildBreakdown(deck) {
+  const el = document.getElementById("buildBreakdown");
+
+  const edhrecCount = deck.filter((c) => c.source === "edhrec").length;
+  const fallbackCreatureCount = deck.filter((c) => c.source === "fallback-creature").length;
+  const fallbackCount = deck.filter((c) => c.source === "fallback").length;
+  const nonbasicCount = deck.filter((c) => c.source === "nonbasic-land").length;
+  const basicCount = deck.filter((c) => c.source === "basic-land").length;
+
+  el.innerHTML = `
+    <div class="info-card fade-up">
+      <div class="info-card-title">Build Breakdown</div>
+      <div class="build-breakdown-grid">
+        <div class="build-breakdown-item"><span>EDHREC Matches</span><strong>${edhrecCount}</strong></div>
+        <div class="build-breakdown-item"><span>Fallback Creatures</span><strong>${fallbackCreatureCount}</strong></div>
+        <div class="build-breakdown-item"><span>Other Fallbacks</span><strong>${fallbackCount}</strong></div>
+        <div class="build-breakdown-item"><span>Nonbasic Lands</span><strong>${nonbasicCount}</strong></div>
+        <div class="build-breakdown-item"><span>Basic Lands</span><strong>${basicCount}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+function generateWarnings(deck, commanderThemes, bracketInfo) {
+  const warnings = [];
+  const creatures = deck.filter((c) => c.type.includes("creature")).length;
+  const ramp = deck.filter((c) => c.role === "ramp").length;
+  const draw = deck.filter((c) => c.role === "draw").length;
+  const removal = deck.filter((c) => c.role === "removal").length;
+  const wipes = deck.filter((c) => c.role === "wipe").length;
+  const basics = deck.filter((c) => c.source === "basic-land").length;
+  const nonbasics = deck.filter((c) => c.source === "nonbasic-land").length;
+  const fallbackCards = deck.filter((c) => c.source === "fallback" || c.source === "fallback-creature").length;
+
+  if (commanderThemes.some((t) => t.endsWith(" tribal")) && creatures < 22) {
+    warnings.push("Low creature count for a tribal deck.");
+  }
+  if (commanderThemes.includes("goWide") && creatures < 20) {
+    warnings.push("Go-wide strategy may be light on creatures or token bodies.");
+  }
+  if (ramp < 8) warnings.push("Ramp count is on the low side.");
+  if (draw < 8) warnings.push("Card draw count is on the low side.");
+  if (removal < 6) warnings.push("Interaction count may be low.");
+  if (wipes < 2 && bracketInfo.bracket >= 3) warnings.push("Only a small number of board wipes found.");
+  if (nonbasics > basics * 1.5 && basics < 10) warnings.push("Mana base may still be a bit too greedy on nonbasics.");
+  if (fallbackCards >= 18) warnings.push("A large portion of the deck came from fallback collection logic, not direct commander overlap.");
+  if (bracketInfo.gameChangers.length >= 4) warnings.push("This build contains several Game Changers and may read stronger than expected at casual tables.");
+
+  return warnings;
+}
+
+function displayWarnings(warnings) {
+  const el = document.getElementById("warningsPanel");
+  el.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.className = "info-card-title";
+  title.textContent = "Warnings / Confidence Notes";
+
+  const card = document.createElement("div");
+  card.className = "info-card fade-up";
+  card.appendChild(title);
+
+  if (!warnings.length) {
+    const copy = document.createElement("div");
+    copy.className = "info-card-copy";
+    copy.textContent = "No major structural issues detected.";
+    card.appendChild(copy);
+    el.appendChild(card);
+    return;
+  }
+
+  warnings.forEach((warning) => {
+    const line = document.createElement("div");
+    line.className = "warning-line";
+    line.textContent = `• ${warning}`;
+    card.appendChild(line);
+  });
+
+  el.appendChild(card);
+}
+
+function renderColorPips(colors) {
+  colorPips.innerHTML = "";
+  const displayColors = colors.length ? colors : ["C"];
+
+  for (const color of displayColors) {
+    const span = document.createElement("span");
+    span.className = `color-pip pip-${color}`;
+    span.textContent = color;
+    colorPips.appendChild(span);
   }
 }
 
+function displayCommanderCard(commanderData) {
+  commanderImage.classList.add("hidden");
+  commanderImageSkeleton.classList.remove("hidden");
 
-.progress-panel {
-  position: static;
+  if (commanderData?.imageUrl) {
+    commanderImage.onload = () => {
+      commanderImageSkeleton.classList.add("hidden");
+      commanderImage.classList.remove("hidden");
+    };
+    commanderImage.onerror = () => {
+      commanderImageSkeleton.classList.add("hidden");
+      commanderImage.classList.add("hidden");
+    };
+    commanderImage.src = commanderData.imageUrl;
+  } else {
+    commanderImage.src = "";
+    commanderImage.classList.add("hidden");
+    commanderImageSkeleton.classList.add("hidden");
+  }
+
+  const colorText = commanderData.colors.length ? commanderData.colors.join("") : "Colorless";
+  commanderMeta.textContent =
+    `Name: ${commanderData.name}
+Mana Cost: ${commanderData.manaCost || "-"}
+Type: ${commanderData.rawType || "-"}
+Color Identity: ${colorText}`;
+
+  renderColorPips(commanderData.colors);
 }
 
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: 1.25fr 1fr 1fr;
-  gap: 16px;
-  margin-bottom: 18px;
+function clearCommanderCard() {
+  commanderImage.onload = null;
+  commanderImage.onerror = null;
+  commanderImage.src = "";
+  commanderImage.classList.add("hidden");
+  commanderImageSkeleton.classList.add("hidden");
+  commanderMeta.textContent = "";
+  colorPips.innerHTML = "";
 }
 
-.dashboard-grid > .panel {
-  margin-bottom: 0;
+function scryfallCardUrl(cardName) {
+  return `${SCRYFALL_CARD_SEARCH}${encodeURIComponent(`"${cardName}"`)}`;
 }
 
-.stat-panel,
-.chart-panel {
-  min-height: 240px;
+function generateMoxfieldExport(deck, commanderName) {
+  const merged = mergeDeckCounts(deck);
+  const lines = [`1 ${commanderName}`];
+  for (const item of merged) {
+    lines.push(`${item.count} ${item.name}`);
+  }
+  return lines.join("\n");
 }
 
-.chart-panel {
-  display: flex;
-  flex-direction: column;
+function displayExportPreview(deck, commanderName, commanderThemes, strategyProfile, commanderColors) {
+  const preview = document.getElementById("exportPreview");
+  preview.innerHTML = "";
+
+  if (!deck?.length) {
+    bindPreviewHoverImages();
+renderPreviewEmptyState();
+    return;
+  }
+
+  const commanderSection = document.createElement("div");
+  commanderSection.className = "preview-section fade-up";
+  commanderSection.innerHTML = `<div class="preview-section-title">Commander</div>`;
+  const commanderLine = document.createElement("div");
+  commanderLine.className = "preview-line";
+  const commanderSourceCard = deck.find((card) => normalizeCardName(card.name) === normalizeCardName(commanderName));
+  commanderLine.innerHTML = `<span class="preview-qty">1</span> ${renderPreviewCardLink(
+    commanderName,
+    scryfallCardUrl(commanderName),
+    getCardImageUrl(commanderSourceCard)
+  )}`;
+  commanderSection.appendChild(commanderLine);
+  preview.appendChild(commanderSection);
+
+  const merged = mergeDeckCounts(deck);
+  const sections = new Map();
+
+  for (const item of merged) {
+    const section = getCardSection(item.type);
+    if (!sections.has(section)) sections.set(section, []);
+    sections.get(section).push(item);
+  }
+
+  const sectionOrder = ["Creatures", "Artifacts", "Enchantments", "Planeswalkers", "Instants", "Sorceries", "Lands", "Other"];
+  let renderedSections = 0;
+
+  for (const sectionName of sectionOrder) {
+    const items = sections.get(sectionName);
+    if (!items || !items.length) continue;
+
+    renderedSections += 1;
+    const section = document.createElement("div");
+    section.className = "preview-section fade-up";
+    section.innerHTML = `<div class="preview-section-title">${escapeHtml(sectionName)} <span class="preview-count">${items.reduce((sum, item) => sum + item.count, 0)}</span></div>`;
+
+    items.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "preview-row";
+
+      const line = document.createElement("div");
+      line.className = "preview-line";
+
+      const sourceCard = deck.find((c) => normalizeCardName(c.name) === normalizeCardName(item.name));
+      line.innerHTML = `<span class="preview-qty">${item.count}</span> ${renderPreviewCardLink(
+        item.name,
+        scryfallCardUrl(item.name),
+        getCardImageUrl(sourceCard)
+      )}`;
+      row.appendChild(line);
+
+      const reasons = sourceCard
+        ? generateCardReasons(sourceCard, commanderThemes, strategyProfile, commanderColors).map(formatThemeLabel)
+        : (item.reasons || []).map(formatThemeLabel);
+
+      if (reasons.length) {
+        const badges = document.createElement("div");
+        badges.className = "reason-badges";
+        reasons.forEach((reason) => {
+          const badge = document.createElement("span");
+          badge.className = "reason-badge";
+          badge.textContent = reason;
+          badges.appendChild(badge);
+        });
+        row.appendChild(badges);
+      }
+
+      section.appendChild(row);
+    });
+
+    preview.appendChild(section);
+  }
+
+  if (renderedSections === 0) {
+    renderPreviewErrorState("The deck preview did not contain any grouped cards.");
+    return;
+  }
+
+  bindPreviewHoverImages();
 }
 
-.chart-title {
-  font-size: 15px;
-  font-weight: 700;
-  margin-bottom: 12px;
-  color: #cbd5e1;
+function displayMoxfieldExport(deck, commanderName, commanderThemes, strategyProfile, commanderColors) {
+  document.getElementById("moxfieldExport").value = generateMoxfieldExport(deck, commanderName);
+  displayExportPreview(deck, commanderName, commanderThemes, strategyProfile, commanderColors);
 }
 
-.chart-panel canvas {
-  flex: 1;
-  min-height: 180px;
+function escapeHtml(text) {
+  return String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-.deck-summary,
-.build-breakdown,
-.warnings-panel,
-.deck-game-changers,
-.deck-bracket {
-  margin-bottom: 14px;
-}
+async function copyMoxfieldExport() {
+  const box = document.getElementById("moxfieldExport");
+  if (!box.value.trim()) return;
 
-.info-card,
-.power-card {
-  padding: 14px 16px;
-  border-radius: 14px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02));
-  border: 1px solid rgba(255,255,255,0.08);
-  box-shadow: 0 10px 24px rgba(0,0,0,0.16);
-}
-
-.info-card-title,
-.power-card-label {
-  font-size: 13px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #93c5fd;
-  margin-bottom: 8px;
-}
-
-.info-card-copy,
-.power-card-subtitle {
-  color: #cbd5e1;
-  line-height: 1.5;
-}
-
-.power-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-}
-
-.power-card-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.deck-bracket .badge {
-  font-size: 13px;
-  white-space: nowrap;
-  box-shadow: 0 8px 20px rgba(0,0,0,0.18);
-}
-
-.build-breakdown-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.build-breakdown-item {
-  background: rgba(255,255,255,0.03);
-  border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 12px;
-  padding: 10px 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.build-breakdown-item span {
-  color: #cbd5e1;
-  font-size: 13px;
-}
-
-.build-breakdown-item strong {
-  font-size: 16px;
-  color: #f3f4f6;
-}
-
-.theme-chips {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.theme-chip {
-  padding: 7px 12px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgba(37,99,235,0.22), rgba(37,99,235,0.14));
-  border: 1px solid rgba(147,197,253,0.18);
-  color: #dbeafe;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.14);
-}
-
-.theme-chip-muted {
-  background: rgba(255,255,255,0.04);
-  border-color: rgba(255,255,255,0.08);
-  color: #cbd5e1;
-}
-
-.stat-panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.eyebrow {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #93c5fd;
-  margin-bottom: 4px;
-}
-
-.stat-panel-title {
-  font-size: 20px;
-  font-weight: 800;
-  line-height: 1.2;
-}
-
-.mini-badge {
-  padding: 6px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 700;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.08);
-  white-space: nowrap;
-}
-
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.stat-card {
-  padding: 14px;
-  border-radius: 14px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.02));
-  border: 1px solid rgba(255,255,255,0.08);
-  box-shadow: 0 10px 24px rgba(0,0,0,0.16);
-}
-
-.stat-label {
-  font-size: 12px;
-  color: #94a3b8;
-  margin-bottom: 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.stat-value {
-  font-size: 28px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.preview-heading {
-  font-weight: 800;
-  margin-bottom: 10px;
-  margin-top: 14px;
-  color: #e5e7eb;
-}
-
-.export-preview {
-  background: #0b1220;
-  border: 1px solid #374151;
-  border-radius: 14px;
-  min-height: 200px;
-  max-height: 520px;
-  overflow-y: auto;
-  padding: 14px;
-  margin-bottom: 14px;
-}
-
-.preview-section {
-  margin-bottom: 16px;
-  border: 1px solid rgba(255,255,255,0.07);
-  border-radius: 14px;
-  padding: 14px;
-  background: rgba(255,255,255,0.02);
-}
-
-.preview-section-title {
-  font-weight: 800;
-  color: #e5e7eb;
-  margin-bottom: 10px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid rgba(255,255,255,0.08);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.preview-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 30px;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  color: #cbd5e1;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.08);
-}
-
-.preview-row + .preview-row {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255,255,255,0.05);
-}
-
-.preview-line {
-  font-family: Consolas, Monaco, monospace;
-  font-size: 13px;
-  line-height: 1.5;
-  word-break: break-word;
-  margin-bottom: 0;
-}
-
-.preview-qty {
-  color: #cbd5e1;
-  display: inline-block;
-  min-width: 28px;
-}
-
-.reason-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 6px;
-  margin-left: 32px;
-}
-
-.reason-badge {
-  font-size: 11px;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.07);
-  color: #cbd5e1;
-}
-
-.warning-line + .warning-line {
-  margin-top: 8px;
-}
-
-.empty-state-card,
-.error-state-card {
-  border-radius: 16px;
-  border: 1px dashed rgba(255,255,255,0.14);
-  background: rgba(255,255,255,0.02);
-  padding: 28px 18px;
-  text-align: center;
-}
-
-.empty-state-icon {
-  font-size: 28px;
-  margin-bottom: 10px;
-}
-
-.empty-state-title {
-  font-size: 18px;
-  font-weight: 800;
-  margin-bottom: 6px;
-}
-
-.empty-state-copy {
-  color: #94a3b8;
-  max-width: 42ch;
-  margin: 0 auto;
-}
-
-.skeleton {
-  position: relative;
-  overflow: hidden;
-  border-radius: 10px;
-  background: rgba(255,255,255,0.06);
-}
-
-.skeleton::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
-  animation: shimmerPulse 1.15s infinite;
-}
-
-@keyframes shimmerPulse {
-  100% { transform: translateX(100%); }
-}
-
-.stat-skeleton-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.skeleton-title { width: 42%; height: 22px; }
-.skeleton-pill { width: 80px; height: 32px; border-radius: 999px; }
-.skeleton-stat { height: 84px; }
-.skeleton-section-title { width: 180px; height: 20px; margin-bottom: 12px; }
-.skeleton-line { width: 100%; height: 16px; margin-bottom: 10px; }
-.skeleton-line.short { width: 70%; }
-
-.fade-up {
-  opacity: 0;
-  transform: translateY(10px);
-  animation: fadeUp 0.45s ease forwards;
-}
-
-.fade-up:nth-child(2) { animation-delay: 0.04s; }
-.fade-up:nth-child(3) { animation-delay: 0.08s; }
-.fade-up:nth-child(4) { animation-delay: 0.12s; }
-.fade-up:nth-child(5) { animation-delay: 0.16s; }
-
-@keyframes fadeUp {
-  to {
-    opacity: 1;
-    transform: translateY(0);
+  try {
+    await navigator.clipboard.writeText(box.value);
+    showToast("Decklist copied.");
+  } catch (error) {
+    box.select();
+    document.execCommand("copy");
+    showToast("Decklist copied.");
   }
 }
 
-.panel,
-.preview-section,
-.stat-card,
-.power-card,
-.theme-chip {
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-}
+async function generateDeck() {
+  const commanderName = commanderInput.value.trim();
+  const file = document.getElementById("csvFile").files[0];
 
-.panel:hover,
-.preview-section:hover,
-.stat-card:hover {
-  transform: translateY(-1px);
-}
+  clearLog();
+  clearCommanderCard();
+  updateProgress(0, "Starting...");
+  displayThemes([]);
+  renderLoadingState();
+  document.getElementById("deckSummary").textContent = "";
+  document.getElementById("deckBracket").textContent = "";
+  document.getElementById("deckGameChangers").textContent = "";
+  document.getElementById("buildBreakdown").textContent = "";
+  document.getElementById("warningsPanel").textContent = "";
+  document.getElementById("moxfieldExport").value = "";
 
-@media (max-width: 1100px) {
-  .dashboard-grid {
-    grid-template-columns: 1fr;
+  if (!commanderName || !file) {
+    renderPreviewEmptyState("Enter a commander and upload a CSV to build a deck.");
+    showToast("Enter a commander and upload a CSV.");
+    updateProgress(0, "Idle");
+    return;
+  }
+
+  document.getElementById("emptyState").classList.add("hidden");
+  setGenerateEnabled(false);
+
+  try {
+    logMessage("Parsing uploaded CSV.");
+    updateProgress(5, "Parsing CSV...");
+    const collection = await parseCSV(file);
+    logMessage(`Parsed ${collection.byNormalized.size} unique cards from CSV.`);
+
+    updateProgress(10, "Validating commander...");
+    logMessage(`Fetching commander info for "${commanderName}" from Scryfall.`);
+    const commanderData = await getCommander(commanderName);
+
+    if (!commanderData) throw new Error("Commander not found on Scryfall.");
+    if (!canBeCommander(commanderData)) throw new Error("Selected card does not appear to be a legal commander.");
+
+    displayCommanderCard(commanderData);
+    logMessage(`Commander found: ${commanderData.name} | Color identity: ${commanderData.colors.join("") || "Colorless"}`);
+
+    updateProgress(18, "Fetching EDHREC synergy data...");
+    logMessage("Loading commander recommendations from EDHREC.");
+    const edhrecCards = await getEDHREC(commanderData.name);
+    if (!edhrecCards.length) throw new Error("No EDHREC data returned for this commander.");
+    logMessage(`EDHREC returned ${edhrecCards.length} candidate cards.`);
+
+    updateProgress(30, "Fetching collection metadata for theme discovery...");
+    const allOwnedNames = collection.originals.map((x) => x.rawName);
+    const allOwnedCardData = await fetchCardDataBatchWithProgress(
+      allOwnedNames,
+      (done, total) => {
+        const pct = 30 + Math.floor((done / Math.max(total, 1)) * 18);
+        updateProgress(pct, "Fetching collection metadata for theme discovery...", `Fetched ${done} / ${total}`);
+      }
+    );
+
+    updateProgress(50, "Detecting commander themes...");
+    logMessage("Analyzing EDHREC and your collection to infer deck themes.");
+    const commanderThemes = await detectCommanderThemes(
+      edhrecCards,
+      collection,
+      allOwnedCardData,
+      commanderData.colors
+    );
+    displayThemes(commanderThemes);
+    logMessage(`Detected themes: ${commanderThemes.join(", ") || "none"}`);
+
+    updateProgress(58, "Matching your collection...");
+    const ownedCandidates = edhrecCards.filter((c) => hasOwnedCard(collection, c.name));
+    logMessage(`${ownedCandidates.length} EDHREC cards overlap with your collection or basic lands.`);
+
+    updateProgress(66, "Fetching EDHREC-overlap metadata...");
+    const ownedCardData = await fetchCardDataBatchWithProgress(
+      ownedCandidates.map((c) => c.name),
+      (done, total) => {
+        const pct = 66 + Math.floor((done / Math.max(total, 1)) * 10);
+        updateProgress(pct, "Fetching EDHREC-overlap metadata...", `Fetched ${done} / ${total}`);
+      }
+    );
+
+    logMessage(`Received metadata for ${ownedCardData.size} owned candidate cards.`);
+
+    currentRunContext = {
+      commanderData,
+      collection,
+      edhrecCards,
+      ownedCardData,
+      allOwnedCardData,
+      commanderThemes
+    };
+
+    await performBuildFromContext();
+    document.getElementById("postBuildControls").classList.remove("hidden");
+  } catch (error) {
+    console.error(error);
+    updateProgress(0, "Error");
+    renderPreviewErrorState(error?.message || "Unable to render deck preview.");
+    logMessage(`ERROR: ${error.message}`);
+    showToast(error.message);
+  } finally {
+    setGenerateEnabled(true);
   }
 }
 
-@media (max-width: 900px) {
-  .progress-panel {
-    position: static;
+async function regenerateWithMode(mode) {
+  if (!currentRunContext) return;
+  currentBuildMode = mode;
+  updatePriorityButtons();
+  setGenerateEnabled(false);
+  try {
+    logMessage(`Regenerating with priority mode: ${mode}.`);
+    updateProgress(90, "Regenerating deck...", mode);
+    await performBuildFromContext();
+    updateProgress(100, "Deck complete!", `${currentBuildMode}`);
+  } catch (error) {
+    console.error(error);
+    renderPreviewErrorState(error?.message || "Unable to regenerate deck preview.");
+    showToast(error.message);
+    logMessage(`ERROR: ${error.message}`);
+  } finally {
+    setGenerateEnabled(true);
   }
 }
 
-@media (max-width: 720px) {
-  .build-breakdown-grid,
-  .stat-grid {
-    grid-template-columns: 1fr 1fr;
+async function performBuildFromContext() {
+  const {
+    commanderData,
+    collection,
+    edhrecCards,
+    ownedCardData,
+    allOwnedCardData,
+    commanderThemes
+  } = currentRunContext;
+
+  const strategyProfile = getCommanderStrategyProfile(
+    commanderData.name,
+    commanderThemes,
+    commanderData.colors
+  );
+
+  const modePrefs = getModePreferences(currentBuildMode, strategyProfile);
+
+  updateProgress(78, "Checking legality and scoring cards...");
+  const scoredNonlands = [];
+  let processed = 0;
+  const ownedCandidates = edhrecCards.filter((c) => hasOwnedCard(collection, c.name));
+  const totalToScore = ownedCandidates.length;
+
+  for (const edhrecCard of ownedCandidates) {
+    processed += 1;
+    const normalizedName = normalizeCardName(edhrecCard.name);
+    const card = ownedCardData.get(normalizedName);
+
+    if (!card || card.type.includes("land") || !legalForCommander(card.colors, commanderData.colors)) {
+      maybeUpdateScoringProgress(processed, totalToScore);
+      continue;
+    }
+
+    const role = detectRole(card);
+    const score = scoreCard(
+      card,
+      edhrecCard,
+      commanderThemes,
+      strategyProfile,
+      commanderData.colors,
+      modePrefs
+    );
+
+    scoredNonlands.push({
+      name: card.name,
+      role,
+      score,
+      type: card.type,
+      cmc: card.cmc,
+      colors: card.colors
+    });
+
+    maybeUpdateScoringProgress(processed, totalToScore);
   }
 
-  .stat-panel-title {
-    font-size: 18px;
+  function maybeUpdateScoringProgress(done, total) {
+    if (done % 20 === 0 || done === total) {
+      updateProgress(
+        78 + Math.floor((done / Math.max(total, 1)) * 8),
+        "Checking legality and scoring cards...",
+        `Processed ${done} / ${total}`
+      );
+    }
   }
 
-  .preview-section {
-    padding: 12px;
-  }
-}
+  logMessage(`After legality checks, ${scoredNonlands.length} nonland cards remain in the EDHREC candidate pool.`);
 
-@media (max-width: 560px) {
-  .build-breakdown-grid,
-  .stat-grid {
-    grid-template-columns: 1fr;
-  }
+  updateProgress(90, "Building deck structure and mana base...");
+  const finalDeck = buildDeckFromScoredPool(
+    scoredNonlands,
+    commanderData.colors,
+    collection,
+    allOwnedCardData,
+    commanderThemes,
+    commanderData.name,
+    modePrefs
+  );
 
-  .stat-panel-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
+  logMessage(`Built final deck with ${finalDeck.length} cards.`);
+  logMessage(`Final deck breakdown: ${finalDeck.filter(c => c.role !== "land").length} nonlands, ${finalDeck.filter(c => c.role === "land").length} lands.`);
 
-  .mini-badge {
-    align-self: flex-start;
-  }
+  const bracketInfo = estimateDeckBracket(
+    finalDeck,
+    commanderThemes,
+    commanderData.colors,
+    commanderData.name
+  );
 
-  .theme-chip {
-    font-size: 12px;
-    padding: 6px 10px;
-  }
+  const warnings = generateWarnings(finalDeck, commanderThemes, bracketInfo);
 
-  .reason-badges {
-    margin-left: 0;
-  }
-}
+  updateProgress(97, "Rendering results...");
+  displayDeckSummary(finalDeck, commanderData.name, commanderData.colors);
+  renderDeckStats(finalDeck, commanderData.name, bracketInfo);
+  displayDeckBracket(bracketInfo);
+  displayGameChangers(bracketInfo);
+  displayBuildBreakdown(finalDeck);
+  displayWarnings(warnings);
+  displayMoxfieldExport(finalDeck, commanderData.name, commanderThemes, strategyProfile, commanderData.colors);
+  renderManaCurve(finalDeck);
+  renderTypeBreakdown(finalDeck);
 
-
-.preview-card-link-wrap {
-  position: relative;
-  display: inline-block;
-}
-
-.preview-card-link {
-  color: inherit;
-  text-decoration: none;
-  border-bottom: 1px dashed rgba(255,255,255,0.18);
-}
-
-.preview-card-link:hover {
-  border-bottom-color: rgba(255,255,255,0.45);
-}
-
-.card-hover-preview {
-  position: fixed;
-  z-index: 9999;
-  pointer-events: none;
-  width: 265px;
-  max-width: 32vw;
-  opacity: 0;
-  transform: translateY(6px) scale(0.98);
-  transition: opacity 0.14s ease, transform 0.14s ease;
-}
-
-.card-hover-preview.visible {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-}
-
-.card-hover-preview img {
-  display: block;
-  width: 100%;
-  height: auto;
-  border-radius: 14px;
-  box-shadow: 0 18px 42px rgba(0,0,0,0.45);
-  border: 1px solid rgba(255,255,255,0.12);
-  background: #111827;
-}
-
-@media (max-width: 900px) {
-  .card-hover-preview {
-    display: none !important;
-  }
+  logMessage(`Estimated ${bracketInfo.label} (score ${bracketInfo.score}).`);
+  updateProgress(100, "Deck complete!", `${finalDeck.length} cards selected`);
+  logMessage("Finished.");
 }
 
 
-.results-grid > * {
-  min-width: 0;
-}
-
-.dashboard-grid {
-  align-items: stretch;
-}
-
-.dashboard-grid > .panel {
-  min-width: 0;
-}
-
-.stat-panel,
-.chart-panel {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.stat-card {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.stat-panel-title,
-.stat-value {
-  overflow-wrap: anywhere;
-}
-
-.chart-canvas-wrap {
-  position: relative;
-  width: 100%;
-  height: 220px;
-  min-height: 220px;
-  max-height: 220px;
-}
-
-.chart-panel canvas {
-  display: block;
-  width: 100% !important;
-  height: 100% !important;
-}
-
-@media (max-width: 720px) {
-  .chart-canvas-wrap {
-    height: 200px;
-    min-height: 200px;
-    max-height: 200px;
-  }
-}
+bindPreviewHoverImages();
+renderPreviewEmptyState();
