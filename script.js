@@ -736,6 +736,19 @@ function renderPreviewErrorState(message = "Something went wrong while preparing
   `;
 }
 
+function getDeckTypeBucket(typeLine) {
+  const type = String(typeLine || "").toLowerCase();
+  if (type.includes("land")) return "Land";
+  if (type.includes("creature")) return "Creature";
+  if (type.includes("instant")) return "Instant";
+  if (type.includes("sorcery")) return "Sorcery";
+  if (type.includes("planeswalker")) return "Planeswalker";
+  if (type.includes("battle")) return "Other";
+  if (type.includes("enchantment")) return "Enchantment";
+  if (type.includes("artifact")) return "Artifact";
+  return "Other";
+}
+
 function countByType(deck) {
   const counts = {
     Land: 0,
@@ -749,15 +762,8 @@ function countByType(deck) {
   };
 
   for (const card of deck || []) {
-    const typeLine = String(card.type || card.type_line || "").toLowerCase();
-    if (typeLine.includes("land")) counts.Land += 1;
-    else if (typeLine.includes("creature")) counts.Creature += 1;
-    else if (typeLine.includes("instant")) counts.Instant += 1;
-    else if (typeLine.includes("sorcery")) counts.Sorcery += 1;
-    else if (typeLine.includes("artifact")) counts.Artifact += 1;
-    else if (typeLine.includes("enchantment")) counts.Enchantment += 1;
-    else if (typeLine.includes("planeswalker")) counts.Planeswalker += 1;
-    else counts.Other += 1;
+    const bucket = getDeckTypeBucket(card.type || card.type_line || "");
+    counts[bucket] += 1;
   }
 
   return counts;
@@ -1202,11 +1208,376 @@ async function getEDHREC(commanderName) {
   }
 
   const tags = extractEdhrecTagsFromData(data);
+  const typeAverages = extractEdhrecTypeAverages(data);
+  const roleTargets = extractEdhrecRoleTargets(data, tags);
 
   return {
     cards: Array.from(deduped.values()),
-    tags
+    tags,
+    typeAverages,
+    roleTargets
   };
+}
+
+function parseEdhrecSectionAverage(section) {
+  const numericCandidates = [
+    section?.avg,
+    section?.average,
+    section?.count,
+    section?.total,
+    section?.num_cards,
+    section?.numCards,
+    section?.cards,
+    section?.amount
+  ];
+
+  for (const candidate of numericCandidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+      return Math.round(candidate);
+    }
+  }
+
+  const textCandidates = [section?.header, section?.value, section?.title, section?.label, section?.tag]
+    .filter(Boolean)
+    .map(String);
+
+  for (const candidate of textCandidates) {
+    const match = candidate.match(/(\d{1,2})/);
+    if (match) return Number(match[1]);
+  }
+
+  if (Array.isArray(section?.cardviews) && section.cardviews.length) {
+    return section.cardviews.length;
+  }
+
+  return null;
+}
+
+function extractEdhrecTypeAverages(data) {
+  const typeKeyMap = {
+    creature: "Creature",
+    creatures: "Creature",
+    instant: "Instant",
+    instants: "Instant",
+    sorcery: "Sorcery",
+    sorceries: "Sorcery",
+    artifact: "Artifact",
+    artifacts: "Artifact",
+    enchantment: "Enchantment",
+    enchantments: "Enchantment",
+    planeswalker: "Planeswalker",
+    planeswalkers: "Planeswalker",
+    land: "Land",
+    lands: "Land"
+  };
+
+  const counts = {};
+
+  function addCount(key, value) {
+    const bucket = typeKeyMap[normalizeThemeName(key)];
+    const numeric = Number(value);
+    if (!bucket || !Number.isFinite(numeric) || numeric < 0) return;
+    counts[bucket] = Math.max(counts[bucket] || 0, Math.round(numeric));
+  }
+
+  function visit(node, depth = 0) {
+    if (!node || depth > 6) return;
+
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item, depth + 1);
+      return;
+    }
+
+    if (typeof node !== "object") return;
+
+    const keys = Object.keys(node);
+    const hasTypeShape = keys.some((key) => typeKeyMap[normalizeThemeName(key)]);
+    if (hasTypeShape) {
+      for (const [key, value] of Object.entries(node)) addCount(key, value);
+    }
+
+    for (const value of Object.values(node)) {
+      if (value && typeof value === "object") visit(value, depth + 1);
+    }
+  }
+
+  visit(data?.container?.json_dict || data);
+
+  const cardlists = data?.container?.json_dict?.cardlists;
+  if (Array.isArray(cardlists)) {
+    for (const section of cardlists) {
+      const labelCandidates = [section?.header, section?.value, section?.title, section?.label, section?.tag]
+        .filter(Boolean)
+        .map((value) => normalizeThemeName(String(value)));
+
+      let bucket = null;
+      for (const label of labelCandidates) {
+        if (typeKeyMap[label]) {
+          bucket = typeKeyMap[label];
+          break;
+        }
+      }
+      if (!bucket) continue;
+
+      const average = parseEdhrecSectionAverage(section);
+      if (!average && average !== 0) continue;
+      counts[bucket] = Math.max(counts[bucket] || 0, Math.round(average));
+    }
+  }
+
+  return Object.keys(counts).length ? counts : null;
+}
+
+function extractEdhrecRoleTargets(data, edhrecTags = []) {
+  const cardlists = data?.container?.json_dict?.cardlists;
+  const roleMatchers = {
+    ramp: ["ramp", "mana ramp", "mana rocks", "mana dorks", "acceleration", "treasure"],
+    draw: ["card draw", "draw", "advantage", "cantrips", "wheel", "wheels"],
+    removal: ["removal", "spot removal", "interaction", "counterspells", "counterspells", "control"],
+    wipe: ["board wipes", "board wipe", "sweepers", "sweeper", "wraths", "wrath"]
+  };
+
+  const counts = {};
+
+  if (Array.isArray(cardlists)) {
+    for (const section of cardlists) {
+      const labelCandidates = [section?.header, section?.value, section?.title, section?.label, section?.tag]
+        .filter(Boolean)
+        .map((value) => normalizeThemeName(String(value)));
+
+      let matchedRole = null;
+      for (const label of labelCandidates) {
+        for (const [role, patterns] of Object.entries(roleMatchers)) {
+          if (patterns.some((pattern) => label.includes(pattern))) {
+            matchedRole = role;
+            break;
+          }
+        }
+        if (matchedRole) break;
+      }
+      if (!matchedRole) continue;
+
+      const average = parseEdhrecSectionAverage(section);
+      if (!average) continue;
+      if (!counts[matchedRole] || average > counts[matchedRole]) counts[matchedRole] = average;
+    }
+  }
+
+  const themeSignals = buildThemeSignalSet(edhrecTags);
+  const defaults = {
+    ramp: 10,
+    draw: 10,
+    removal: 8,
+    wipe: 3
+  };
+
+  const adjusted = {
+    ramp: counts.ramp ?? defaults.ramp,
+    draw: counts.draw ?? defaults.draw,
+    removal: counts.removal ?? defaults.removal,
+    wipe: counts.wipe ?? defaults.wipe
+  };
+
+  if (themeSignals.has("spellslinger") || themeSignals.has("cantrips")) {
+    adjusted.draw += 2;
+    adjusted.removal += 1;
+  }
+  if (themeSignals.has("group hug") || themeSignals.has("opponent draw") || themeSignals.has("wheels")) {
+    adjusted.draw += 2;
+  }
+  if (themeSignals.has("artifacts") || themeSignals.has("treasure") || themeSignals.has("lands") || themeSignals.has("landfall")) {
+    adjusted.ramp += 1;
+  }
+  if (themeSignals.has("sacrifice") || themeSignals.has("aristocrats") || themeSignals.has("graveyard") || themeSignals.has("reanimator")) {
+    adjusted.draw += 1;
+    adjusted.removal += 1;
+  }
+  if (themeSignals.has("tokens") || themeSignals.has("gowide") || themeSignals.has("voltron")) {
+    adjusted.removal += 1;
+    adjusted.wipe = Math.max(adjusted.wipe - 1, 2);
+  }
+  if (themeSignals.has("counters") || themeSignals.has("countersmatter") || themeSignals.has("lifegain")) {
+    adjusted.draw += 1;
+  }
+
+  return Object.fromEntries(
+    Object.entries(adjusted).map(([role, value]) => {
+      const minimum = role === "wipe" ? 2 : role === "removal" ? 6 : 8;
+      const maximum = role === "wipe" ? 5 : 14;
+      return [role, Math.max(minimum, Math.min(maximum, Math.round(Number(value) || defaults[role])))];
+    })
+  );
+}
+
+function buildTypeTargetPlan(edhrecTypeAverages, strategyProfile, targetLandCount, commanderThemes = []) {
+  const themeSignals = buildThemeSignalSet(commanderThemes);
+  const requestedLandCount = Math.max(32, Math.min(40, Math.round(Number(edhrecTypeAverages?.Land) || targetLandCount)));
+  const targetNonlandCount = 99 - requestedLandCount;
+
+  const defaults = {
+    Creature: strategyProfile.wantsCreatures
+      ? (strategyProfile.wantsTribal || strategyProfile.wantsGoWide ? 26 : 20)
+      : 12,
+    Instant: strategyProfile.wantsCantrips ? 10 : 7,
+    Sorcery: strategyProfile.wantsCantrips ? 11 : 8,
+    Artifact: themeSignals?.has?.("artifacts") ? 11 : 7,
+    Enchantment: themeSignals?.has?.("enchantments") ? 10 : 5,
+    Planeswalker: 1
+  };
+
+  const buckets = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker"];
+  const raw = Object.fromEntries(
+    buckets.map((bucket) => {
+      const value = Number(edhrecTypeAverages?.[bucket]);
+      return [bucket, Number.isFinite(value) && value >= 0 ? value : defaults[bucket]];
+    })
+  );
+
+  let totalRaw = buckets.reduce((sum, bucket) => sum + (raw[bucket] || 0), 0);
+  if (totalRaw <= 0) totalRaw = buckets.reduce((sum, bucket) => sum + defaults[bucket], 0);
+
+  const scaled = {};
+  let assigned = 0;
+  for (const bucket of buckets) {
+    const exact = ((raw[bucket] || defaults[bucket]) / totalRaw) * targetNonlandCount;
+    scaled[bucket] = Math.max(bucket === "Planeswalker" ? 0 : 1, Math.round(exact));
+    assigned += scaled[bucket];
+  }
+
+  const preferenceOrder = ["Creature", "Artifact", "Enchantment", "Instant", "Sorcery", "Planeswalker"];
+  while (assigned < targetNonlandCount) {
+    for (const bucket of preferenceOrder) {
+      scaled[bucket] += 1;
+      assigned += 1;
+      if (assigned >= targetNonlandCount) break;
+    }
+  }
+  while (assigned > targetNonlandCount) {
+    for (const bucket of ["Planeswalker", "Sorcery", "Instant", "Enchantment", "Artifact", "Creature"]) {
+      const minimumFloor = bucket === "Creature"
+        ? Math.max(8, strategyProfile.wantsCreatures ? 14 : 8)
+        : bucket === "Planeswalker" ? 0 : 1;
+      if (scaled[bucket] > minimumFloor) {
+        scaled[bucket] -= 1;
+        assigned -= 1;
+      }
+      if (assigned <= targetNonlandCount) break;
+    }
+  }
+
+  const plan = {};
+  for (const bucket of buckets) {
+    const target = scaled[bucket];
+    const flex = bucket === "Planeswalker" ? 1 : 2;
+    const minimumFloor = bucket === "Creature"
+      ? Math.max(8, strategyProfile.wantsCreatures ? 14 : 8)
+      : bucket === "Planeswalker" ? 0 : 1;
+    plan[bucket] = {
+      target,
+      min: Math.max(minimumFloor, target - flex),
+      max: target + flex
+    };
+  }
+
+  return {
+    landCount: requestedLandCount,
+    nonlandCount: targetNonlandCount,
+    buckets: plan
+  };
+}
+
+function canAddCardForTypePlan(card, deck, typePlan, strict = true) {
+  const planBuckets = typePlan?.buckets || typePlan || {};
+  const bucket = getDeckTypeBucket(card.type || card.type_line || "");
+  if (!planBuckets[bucket]) return true;
+  const counts = countByType(deck);
+  const limit = strict ? planBuckets[bucket].max : planBuckets[bucket].max + 2;
+  return counts[bucket] < limit;
+}
+
+function getCardsNeededForTypeMinimums(deck, typePlan) {
+  const planBuckets = typePlan?.buckets || typePlan || {};
+  const counts = countByType(deck);
+  const needed = [];
+  for (const [bucket, rule] of Object.entries(planBuckets)) {
+    const deficit = Math.max(0, (rule?.min || 0) - (counts[bucket] || 0));
+    for (let i = 0; i < deficit; i++) needed.push(bucket);
+  }
+  return needed;
+}
+
+function getTypePlanBucketNeed(deck, typePlan, bucket) {
+  const planBuckets = typePlan?.buckets || typePlan || {};
+  const counts = countByType(deck);
+  const rule = planBuckets[bucket];
+  if (!rule) return 0;
+  return Math.max(0, (rule.target || 0) - (counts[bucket] || 0));
+}
+
+function getRoleCounts(deck) {
+  return {
+    ramp: deck.filter((card) => card.role === "ramp").length,
+    draw: deck.filter((card) => card.role === "draw").length,
+    removal: deck.filter((card) => card.role === "removal").length,
+    wipe: deck.filter((card) => card.role === "wipe").length
+  };
+}
+
+function pickBestCardForBucket(pool, usedNames, commanderName, bucket) {
+  const normalizedCommander = normalizeCardName(commanderName);
+  for (const card of pool) {
+    const key = normalizeCardName(card.name);
+    if (usedNames.has(key) || key === normalizedCommander) continue;
+    if (getDeckTypeBucket(card.type || card.type_line || "") !== bucket) continue;
+    return card;
+  }
+  return null;
+}
+
+function chooseBestFlexibleCard(pool, deck, typePlan, roleTargets, usedNames, commanderName) {
+  const normalizedCommander = normalizeCardName(commanderName);
+  const counts = countByType(deck);
+  const roleCounts = getRoleCounts(deck);
+  const planBuckets = typePlan?.buckets || typePlan || {};
+
+  let best = null;
+  let bestScore = -Infinity;
+
+  for (const card of pool) {
+    const key = normalizeCardName(card.name);
+    if (usedNames.has(key) || key === normalizedCommander) continue;
+
+    const bucket = getDeckTypeBucket(card.type || card.type_line || "");
+    const rule = planBuckets[bucket];
+    const bucketCount = counts[bucket] || 0;
+    if (rule && bucketCount >= rule.max + 2) continue;
+
+    let adjustedScore = Number(card.score || 0);
+
+    if (rule) {
+      const target = Number(rule.target || 0);
+      const deficit = Math.max(0, target - bucketCount);
+      const overflow = Math.max(0, bucketCount - target);
+      adjustedScore += deficit * 30;
+      adjustedScore -= overflow * 18;
+      if (bucketCount < (rule.min || 0)) adjustedScore += 35;
+      if (bucketCount >= (rule.max || 999)) adjustedScore -= 28;
+    }
+
+    if (roleTargets && roleTargets[card.role]) {
+      const roleDeficit = Math.max(0, Number(roleTargets[card.role]) - Number(roleCounts[card.role] || 0));
+      adjustedScore += roleDeficit * 12;
+    }
+
+    if (bucket === "Creature") adjustedScore += 4;
+
+    if (adjustedScore > bestScore) {
+      best = card;
+      bestScore = adjustedScore;
+    }
+  }
+
+  return best;
 }
 
 async function fetchCardDataBatchWithProgress(cardNames, progressCallback) {
@@ -1988,157 +2359,151 @@ function buildDeckFromScoredPool(
   allOwnedCardData,
   commanderThemes,
   commanderName,
-  modePrefs
+  modePrefs,
+  edhrecTypeAverages = null,
+  edhrecRoleTargets = null
 ) {
   const deck = [];
   const usedNames = new Set();
   const normalizedCommander = normalizeCardName(commanderName);
   const strategyProfile = getCommanderStrategyProfile(commanderName, commanderThemes, commanderColors);
 
-  const targetLandCount = recommendLandCount(commanderColors);
-  const targetNonlandCount = 99 - targetLandCount;
+  const recommendedLandCount = recommendLandCount(commanderColors);
+  const typePlan = buildTypeTargetPlan(edhrecTypeAverages, strategyProfile, recommendedLandCount, commanderThemes);
+  const targetLandCount = typePlan.landCount;
+  const targetNonlandCount = typePlan.nonlandCount;
 
-  const targets = {
-    ramp: 10,
-    draw: 10,
-    removal: 8,
-    wipe: 3
+  const roleTargets = {
+    ramp: Math.round(Number(edhrecRoleTargets?.ramp) || 10),
+    draw: Math.round(Number(edhrecRoleTargets?.draw) || 10),
+    removal: Math.round(Number(edhrecRoleTargets?.removal) || 8),
+    wipe: Math.round(Number(edhrecRoleTargets?.wipe) || 3)
   };
 
-  const minimumCreatureCount = strategyProfile.wantsCreatures
-    ? (strategyProfile.wantsTribal || strategyProfile.wantsGoWide ? 24 : 18) + modePrefs.minimumCreatureBonus
-    : 10 + Math.floor(modePrefs.minimumCreatureBonus / 2);
-
-  const byRole = {
-    ramp: [],
-    draw: [],
-    removal: [],
-    wipe: [],
-    synergy: []
-  };
-
-  for (const card of scoredNonlands) {
-    if (byRole[card.role]) byRole[card.role].push(card);
-    else byRole.synergy.push(card);
+  if (typePlan?.buckets?.Creature) {
+    typePlan.buckets.Creature.min = Math.max(
+      typePlan.buckets.Creature.min,
+      strategyProfile.wantsCreatures
+        ? (strategyProfile.wantsTribal || strategyProfile.wantsGoWide ? 22 : 16) + modePrefs.minimumCreatureBonus
+        : 10 + Math.floor(modePrefs.minimumCreatureBonus / 2)
+    );
+    typePlan.buckets.Creature.max = Math.max(typePlan.buckets.Creature.max, typePlan.buckets.Creature.min);
   }
 
-  for (const role of Object.keys(byRole)) {
-    byRole[role].sort((a, b) => b.score - a.score);
+  const fallbackPool = [];
+  const seenFallback = new Set();
+
+  for (const entry of collectionData.originals) {
+    const normalizedName = entry.normalizedName;
+    if (seenFallback.has(normalizedName)) continue;
+    seenFallback.add(normalizedName);
+    if (normalizedName === normalizedCommander) continue;
+
+    const card = allOwnedCardData.get(normalizedName);
+    if (!card) continue;
+    if (getCardType(card).includes("land")) continue;
+    if (!legalForCommander(card.colors, commanderColors)) continue;
+
+    fallbackPool.push({
+      name: card.name,
+      role: detectRole(card),
+      score: scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColors, modePrefs),
+      type: getCardType(card),
+      cmc: card.cmc,
+      colors: card.colors
+    });
   }
 
-  for (const [role, count] of Object.entries(targets)) {
-    let addedForRole = 0;
+  scoredNonlands.sort((a, b) => b.score - a.score);
+  fallbackPool.sort((a, b) => b.score - a.score);
 
-    for (const card of byRole[role]) {
-      if (deck.length >= targetNonlandCount) break;
+  const buckets = ["Creature", "Artifact", "Enchantment", "Instant", "Sorcery", "Planeswalker"];
 
-      const key = normalizeCardName(card.name);
-      if (usedNames.has(key) || key === normalizedCommander) continue;
+  function addCard(card, source) {
+    if (!card) return false;
+    const key = normalizeCardName(card.name);
+    if (usedNames.has(key) || key === normalizedCommander) return false;
+    deck.push({ ...card, source });
+    usedNames.add(key);
+    return true;
+  }
 
-      deck.push({ ...card, source: "edhrec" });
-      usedNames.add(key);
-      addedForRole += 1;
+  // Phase 1: hit the EDHREC type mix using EDHREC-owned matches first.
+  for (const bucket of buckets) {
+    const target = Number(typePlan?.buckets?.[bucket]?.target || 0);
+    while (getTypePlanBucketNeed(deck, typePlan, bucket) > 0 && deck.length < targetNonlandCount) {
+      const edhrecPick = pickBestCardForBucket(scoredNonlands, usedNames, commanderName, bucket);
+      if (edhrecPick) {
+        addCard(edhrecPick, "edhrec");
+        continue;
+      }
 
-      if (addedForRole >= count) break;
+      const fallbackPick = pickBestCardForBucket(fallbackPool, usedNames, commanderName, bucket);
+      if (fallbackPick) {
+        addCard(fallbackPick, bucket === "Creature" ? "fallback-creature" : "fallback");
+        continue;
+      }
+
+      break;
     }
   }
 
-  const rankedEdhrecPool = [
-    ...byRole.synergy,
-    ...byRole.ramp,
-    ...byRole.draw,
-    ...byRole.removal,
-    ...byRole.wipe
-  ].sort((a, b) => b.score - a.score);
-
-  for (const card of rankedEdhrecPool) {
+  // Phase 2: satisfy missing type minimums from the rest of the collection.
+  for (const neededBucket of getCardsNeededForTypeMinimums(deck, typePlan)) {
     if (deck.length >= targetNonlandCount) break;
 
-    const key = normalizeCardName(card.name);
-    if (usedNames.has(key) || key === normalizedCommander) continue;
-
-    deck.push({ ...card, source: "edhrec" });
-    usedNames.add(key);
-  }
-
-  const currentCreatureCount = () => deck.filter((c) => getCardType(c).includes("creature")).length;
-
-  if (currentCreatureCount() < minimumCreatureCount) {
-    const creatureFallbackPool = [];
-    const seenCreatures = new Set();
-
-    for (const entry of collectionData.originals) {
-      const normalizedName = entry.normalizedName;
-      if (seenCreatures.has(normalizedName)) continue;
-      seenCreatures.add(normalizedName);
-
-      if (normalizedName === normalizedCommander || usedNames.has(normalizedName)) continue;
-
-      const card = allOwnedCardData.get(normalizedName);
-      if (!card) continue;
-      if (!getCardType(card).includes("creature")) continue;
-      if (!legalForCommander(card.colors, commanderColors)) continue;
-
-      creatureFallbackPool.push({
-        name: card.name,
-        role: detectRole(card),
-        score: scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColors, modePrefs) + 10,
-        type: getCardType(card),
-        cmc: card.cmc,
-        colors: card.colors
-      });
+    const edhrecPick = pickBestCardForBucket(scoredNonlands, usedNames, commanderName, neededBucket);
+    if (edhrecPick) {
+      addCard(edhrecPick, "edhrec");
+      continue;
     }
 
-    creatureFallbackPool.sort((a, b) => b.score - a.score);
-
-    for (const card of creatureFallbackPool) {
-      if (currentCreatureCount() >= minimumCreatureCount) break;
-      if (deck.length >= targetNonlandCount) break;
-
-      const key = normalizeCardName(card.name);
-      if (usedNames.has(key)) continue;
-
-      deck.push({ ...card, source: "fallback-creature" });
-      usedNames.add(key);
+    const fallbackPick = pickBestCardForBucket(fallbackPool, usedNames, commanderName, neededBucket);
+    if (fallbackPick) {
+      addCard(fallbackPick, neededBucket === "Creature" ? "fallback-creature" : "fallback");
     }
   }
 
-  if (deck.length < targetNonlandCount) {
-    const fallbackPool = [];
-    const seenFallback = new Set();
+  // Phase 3: fill the remaining slots with the best cards, prioritizing whatever type and role is still short.
+  const combinedPool = [...scoredNonlands, ...fallbackPool];
+  while (deck.length < targetNonlandCount) {
+    const best = chooseBestFlexibleCard(combinedPool, deck, typePlan, roleTargets, usedNames, commanderName);
+    if (!best) break;
 
-    for (const entry of collectionData.originals) {
-      const normalizedName = entry.normalizedName;
-      if (seenFallback.has(normalizedName)) continue;
-      seenFallback.add(normalizedName);
+    const bucket = getDeckTypeBucket(best.type || best.type_line || "");
+    const source = scoredNonlands.includes(best)
+      ? "edhrec"
+      : bucket === "Creature" ? "fallback-creature" : "fallback";
 
-      if (normalizedName === normalizedCommander || usedNames.has(normalizedName)) continue;
+    addCard(best, source);
+  }
 
-      const card = allOwnedCardData.get(normalizedName);
-      if (!card) continue;
-      if (getCardType(card).includes("land")) continue;
-      if (!legalForCommander(card.colors, commanderColors)) continue;
+  // Phase 4: emergency creature backfill if the collection was extremely spell-heavy.
+  const creatureRule = typePlan?.buckets?.Creature;
+  if (creatureRule) {
+    while ((countByType(deck).Creature || 0) < creatureRule.min && deck.length) {
+      const fallbackCreature = pickBestCardForBucket(fallbackPool, usedNames, commanderName, "Creature");
+      if (!fallbackCreature) break;
 
-      fallbackPool.push({
-        name: card.name,
-        role: detectRole(card),
-        score: scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColors, modePrefs),
-        type: getCardType(card),
-        cmc: card.cmc,
-        colors: card.colors
-      });
-    }
+      let replaceIndex = -1;
+      let replaceScore = Infinity;
+      const counts = countByType(deck);
+      for (let i = 0; i < deck.length; i++) {
+        const existing = deck[i];
+        const bucket = getDeckTypeBucket(existing.type || existing.type_line || "");
+        if (bucket === "Creature") continue;
+        const rule = typePlan?.buckets?.[bucket];
+        if (rule && (counts[bucket] || 0) <= rule.min) continue;
+        if ((existing.score || 0) < replaceScore) {
+          replaceScore = existing.score || 0;
+          replaceIndex = i;
+        }
+      }
 
-    fallbackPool.sort((a, b) => b.score - a.score);
-
-    for (const card of fallbackPool) {
-      if (deck.length >= targetNonlandCount) break;
-
-      const key = normalizeCardName(card.name);
-      if (usedNames.has(key) || key === normalizedCommander) continue;
-
-      deck.push({ ...card, source: "fallback" });
-      usedNames.add(key);
+      if (replaceIndex === -1) break;
+      usedNames.delete(normalizeCardName(deck[replaceIndex].name));
+      deck.splice(replaceIndex, 1);
+      addCard(fallbackCreature, "fallback-creature");
     }
   }
 
@@ -2568,7 +2933,14 @@ function displayCommanderCard(commanderData) {
     commanderImageSkeleton.classList.add("hidden");
   }
 
-  commanderMeta.textContent = "";
+  const colorIdentity = (commanderData.colors || []).join("") || "Colorless";
+  const metaLines = [
+    commanderData?.name || "",
+    commanderData?.rawType || "Unknown type",
+    commanderData?.manaCost ? `Mana Cost: ${commanderData.manaCost}` : "Mana Cost: N/A",
+    `Color Identity: ${colorIdentity}`
+  ].filter(Boolean);
+  commanderMeta.textContent = metaLines.join("\n");
   renderColorPips(commanderData.colors);
 }
 
@@ -2601,7 +2973,7 @@ function displayExportPreview(deck, commanderName, commanderThemes, strategyProf
 
   if (!deck?.length) {
     bindPreviewHoverImages();
-renderPreviewEmptyState();
+    renderPreviewEmptyState();
     return;
   }
 
@@ -2717,6 +3089,10 @@ async function generateDeck() {
   const commanderName = commanderInput.value.trim();
   const file = document.getElementById("csvFile").files[0];
 
+  currentRunContext = null;
+  currentBuildMode = "balanced";
+  document.getElementById("postBuildControls").classList.add("hidden");
+
   clearLog();
   clearCommanderCard();
   updateProgress(0, "Starting...");
@@ -2765,6 +3141,20 @@ async function generateDeck() {
     if (edhrecTags.length) {
       logMessage(`Using EDHREC tags: ${edhrecTags.map(formatThemeLabel).join(", ")}`);
     }
+    if (edhrecData.typeAverages) {
+      const typeSummary = Object.entries(edhrecData.typeAverages)
+        .filter(([, count]) => Number.isFinite(count) && count > 0)
+        .map(([type, count]) => `${type}: ${count}`)
+        .join(", ");
+      if (typeSummary) logMessage(`Using EDHREC type targets: ${typeSummary}`);
+    }
+    if (edhrecData.roleTargets) {
+      const roleSummary = Object.entries(edhrecData.roleTargets)
+        .filter(([, count]) => Number.isFinite(count) && count > 0)
+        .map(([role, count]) => `${role}: ${count}`)
+        .join(", ");
+      if (roleSummary) logMessage(`Using EDHREC support package targets: ${roleSummary}`);
+    }
 
     updateProgress(30, "Fetching collection metadata for theme discovery...");
     const allOwnedNames = collection.originals.map((x) => x.rawName);
@@ -2811,13 +3201,17 @@ async function generateDeck() {
       edhrecCards,
       ownedCardData,
       allOwnedCardData,
-      commanderThemes
+      commanderThemes,
+      typeAverages: edhrecData?.typeAverages || null,
+      roleTargets: edhrecData?.roleTargets || null
     };
 
     await performBuildFromContext();
     document.getElementById("postBuildControls").classList.remove("hidden");
   } catch (error) {
     console.error(error);
+    currentRunContext = null;
+    document.getElementById("postBuildControls").classList.add("hidden");
     updateProgress(0, "Error");
     renderPreviewErrorState(error?.message || "Unable to render deck preview.");
     logMessage(`ERROR: ${error.message}`);
@@ -2854,7 +3248,9 @@ async function performBuildFromContext() {
     edhrecCards,
     ownedCardData,
     allOwnedCardData,
-    commanderThemes
+    commanderThemes,
+    typeAverages,
+    roleTargets
   } = currentRunContext;
 
   const strategyProfile = getCommanderStrategyProfile(
@@ -2923,7 +3319,9 @@ async function performBuildFromContext() {
     allOwnedCardData,
     commanderThemes,
     commanderData.name,
-    modePrefs
+    modePrefs,
+    typeAverages,
+    roleTargets
   );
 
   logMessage(`Built final deck with ${finalDeck.length} cards.`);
