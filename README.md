@@ -1,6 +1,8 @@
 # Bulk to Bracket
 
-Turn your bulk Magic collection into a **synergistic, bracket-aware Commander deck**.
+Click the link below to turn your bulk Magic collection into a **synergistic, bracket-aware Commander deck**.
+
+https://outsiderxi.github.io/bulk-to-bracket/
 
 Bulk to Bracket is a web app that lets you:
 
