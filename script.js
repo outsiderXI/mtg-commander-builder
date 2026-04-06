@@ -2,11 +2,15 @@ const SCRYFALL_NAMED = "https://api.scryfall.com/cards/named?exact=";
 const SCRYFALL_AUTOCOMPLETE = "https://api.scryfall.com/cards/autocomplete?q=";
 const SCRYFALL_COLLECTION = "https://api.scryfall.com/cards/collection";
 const EDHREC_BASE = "https://json.edhrec.com/pages/commanders/";
+const EDHREC_CORS_PROXIES = [
+  (url) => url,
+  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  (url) => `https://cors.isomorphic-git.org/${url}`
+];
 const SCRYFALL_CARD_SEARCH = "https://scryfall.com/search?q=!";
 
 const commanderInput = document.getElementById("commanderInput");
 const autocompleteList = document.getElementById("autocompleteList");
-const csvFileInput = document.getElementById("csvFile");
 const generateBtn = document.getElementById("generateBtn");
 const copyExportBtn = document.getElementById("copyExportBtn");
 
@@ -18,18 +22,13 @@ const toast = document.getElementById("toast");
 const deckStats = document.getElementById("deckStats");
 
 const cardCache = new Map();
-const CARD_CACHE_STORAGE_KEY = "mtg_commander_builder_card_cache_v1";
-const MAX_PERSISTED_CACHE_ENTRIES = 2000;
 
 let autocompleteTimer = null;
 let activeAutocompleteIndex = -1;
 let currentAutocompleteItems = [];
 let toastTimer = null;
-let currentThemeFocus = "";
+let currentBuildMode = "balanced";
 let currentRunContext = null;
-let forceGenerateDisabled = false;
-
-const WUBRG_ORDER = ["W", "U", "B", "R", "G", "C"];
 
 const BASIC_LANDS = [
   { name: "Plains", colorsProduced: ["W"] },
@@ -116,7 +115,6 @@ generateBtn.addEventListener("click", generateDeck);
 copyExportBtn.addEventListener("click", copyMoxfieldExport);
 commanderInput.addEventListener("input", onCommanderInput);
 commanderInput.addEventListener("keydown", onAutocompleteKeydown);
-csvFileInput.addEventListener("change", updateGenerateButtonState);
 
 
 document.addEventListener("click", (event) => {
@@ -130,19 +128,13 @@ if (priorityButtonsWrap) {
   priorityButtonsWrap.addEventListener("click", (event) => {
     const button = event.target.closest(".priority-btn");
     if (!button) return;
-    if (button.disabled) return;
     regenerateWithMode(button.dataset.mode);
   });
 }
 
 function updatePriorityButtons() {
   document.querySelectorAll(".priority-btn").forEach((btn) => {
-    const mode = String(btn.dataset.mode || "");
-    if (mode.startsWith("theme:")) {
-      btn.classList.toggle("active", mode.slice(6) === currentThemeFocus);
-      return;
-    }
-    btn.classList.remove("active");
+    btn.classList.toggle("active", btn.dataset.mode === currentBuildMode);
   });
 }
 
@@ -153,10 +145,24 @@ function renderPriorityButtons(commanderThemes = []) {
   const uniqueThemes = Array.from(new Set((commanderThemes || []).filter(Boolean))).slice(0, 5);
   const sections = [
     {
+      title: "Build Style",
+      buttons: [
+        { mode: "balanced", label: "Balanced" },
+        { mode: "fewer-staples", label: "Fewer Staples" }
+      ]
+    },
+    {
       title: "Detected Themes",
       buttons: uniqueThemes.map((theme) => ({
         mode: `theme:${theme}`,
         label: formatThemeLabel(theme)
+      }))
+    },
+    {
+      title: "Bracket Target",
+      buttons: [1, 2, 3, 4, 5].map((bracket) => ({
+        mode: `bracket:${bracket}`,
+        label: `Bracket ${bracket}`
       }))
     }
   ].filter((section) => section.buttons.length);
@@ -166,19 +172,13 @@ function renderPriorityButtons(commanderThemes = []) {
       <div class="priority-section-label">${escapeHtml(section.title)}</div>
       <div class="priority-section-buttons">
         ${section.buttons.map((btn) => `
-          <button class="priority-btn" data-mode="${escapeHtml(btn.mode)}" type="button" ${btn.disabled ? "disabled" : ""}>${escapeHtml(btn.label)}</button>
+          <button class="priority-btn" data-mode="${escapeHtml(btn.mode)}" type="button">${escapeHtml(btn.label)}</button>
         `).join("")}
       </div>
     </div>
   `).join("");
 
   updatePriorityButtons();
-}
-
-function getCurrentBuildMode() {
-  const parts = [];
-  if (currentThemeFocus) parts.push(`theme:${currentThemeFocus}`);
-  return parts.join("|");
 }
 
 function updateProgress(percent, statusText, subStatus = "") {
@@ -203,101 +203,11 @@ function showToast(message) {
 }
 
 function setGenerateEnabled(enabled) {
-  forceGenerateDisabled = !enabled;
-  updateGenerateButtonState();
-}
-
-function updateGenerateButtonState() {
-  const commanderName = commanderInput.value.trim();
-  const file = csvFileInput?.files?.[0];
-  generateBtn.disabled = forceGenerateDisabled || !commanderName || !file;
-}
-
-function sortColorsWubrg(colors = []) {
-  const unique = Array.from(new Set((colors || []).filter(Boolean).map((color) => String(color).toUpperCase())));
-  const weight = (color) => {
-    const index = WUBRG_ORDER.indexOf(String(color || "").toUpperCase());
-    return index === -1 ? 99 : index;
-  };
-  return unique.sort((a, b) => weight(a) - weight(b));
+  generateBtn.disabled = !enabled;
 }
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function trimCardForPersistentCache(card) {
-  if (!card || typeof card !== "object") return null;
-  return {
-    name: card.name || "",
-    type: card.type || "",
-    rawType: card.rawType || "",
-    text: card.text || "",
-    rawText: card.rawText || "",
-    cmc: Number(card.cmc || 0),
-    colors: Array.isArray(card.colors) ? card.colors : [],
-    layout: card.layout || "",
-    legalities: card.legalities || {},
-    producedMana: Array.isArray(card.producedMana) ? card.producedMana : [],
-    imageUrl: card.imageUrl || "",
-    manaCost: card.manaCost || "",
-    scryfallUrl: card.scryfallUrl || "",
-    savedAt: Date.now()
-  };
-}
-
-function restoreCardFromPersistentCache(value) {
-  if (!value || typeof value !== "object") return null;
-  if (!value.name) return null;
-  return {
-    name: String(value.name || ""),
-    type: String(value.type || "").toLowerCase(),
-    rawType: String(value.rawType || value.type || ""),
-    text: String(value.text || value.rawText || "").toLowerCase(),
-    rawText: String(value.rawText || value.text || ""),
-    cmc: Number(value.cmc || 0),
-    colors: Array.isArray(value.colors) ? value.colors : [],
-    layout: String(value.layout || "").toLowerCase(),
-    legalities: value.legalities || {},
-    producedMana: Array.isArray(value.producedMana) ? value.producedMana : [],
-    imageUrl: String(value.imageUrl || ""),
-    manaCost: String(value.manaCost || ""),
-    scryfallUrl: String(value.scryfallUrl || "")
-  };
-}
-
-function hydrateCardCacheFromStorage() {
-  try {
-    const raw = localStorage.getItem(CARD_CACHE_STORAGE_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return;
-
-    for (const entry of parsed) {
-      const card = restoreCardFromPersistentCache(entry);
-      if (!card) continue;
-      cardCache.set(normalizeCardName(card.name), card);
-    }
-  } catch (error) {
-    console.warn("Unable to hydrate local card cache.", error);
-  }
-}
-
-function persistCardCacheToStorage() {
-  try {
-    const cards = [];
-    for (const [, value] of cardCache.entries()) {
-      if (!value) continue;
-      const trimmed = trimCardForPersistentCache(value);
-      if (trimmed) cards.push(trimmed);
-    }
-
-    cards.sort((a, b) => Number(b.savedAt || 0) - Number(a.savedAt || 0));
-    const limited = cards.slice(0, MAX_PERSISTED_CACHE_ENTRIES);
-    localStorage.setItem(CARD_CACHE_STORAGE_KEY, JSON.stringify(limited));
-  } catch (error) {
-    console.warn("Unable to persist local card cache.", error);
-  }
 }
 
 function normalizeCardName(name) {
@@ -711,7 +621,7 @@ async function resolveHoverImageUrl(link) {
   }
 
   try {
-    const response = await fetch(`${SCRYFALL_NAMED}${encodeURIComponent(cardName)}`);
+    const response = await fetchWithRetry(`${SCRYFALL_NAMED}${encodeURIComponent(cardName)}`);
     if (!response.ok) throw new Error(`Failed to fetch image for ${cardName}`);
     const data = await response.json();
     const imageUrl = getCardImageUrl(data);
@@ -1010,7 +920,6 @@ let autocompleteRequestId = 0;
 
 async function onCommanderInput() {
   const query = commanderInput.value.trim();
-  updateGenerateButtonState();
 
   if (autocompleteTimer) clearTimeout(autocompleteTimer);
 
@@ -1073,7 +982,7 @@ function onAutocompleteKeydown(event) {
 }
 
 async function fetchCommanderAutocomplete(query) {
-  const response = await fetch(`${SCRYFALL_AUTOCOMPLETE}${encodeURIComponent(query)}`);
+  const response = await fetchWithRetry(`${SCRYFALL_AUTOCOMPLETE}${encodeURIComponent(query)}`);
   if (!response.ok) throw new Error("Autocomplete request failed.");
   const data = await response.json();
   return Array.isArray(data.data) ? data.data.slice(0, 12) : [];
@@ -1128,7 +1037,6 @@ function refreshActiveAutocompleteItem() {
 
 function selectAutocompleteItem(name) {
   commanderInput.value = name;
-  updateGenerateButtonState();
   hideAutocomplete();
 }
 
@@ -1149,18 +1057,13 @@ function hasOwnedCard(collectionData, cardName) {
   return collectionData.byNormalized.has(normalized) || isBasicLand(cardName);
 }
 
-function getCollectionEntries(collectionData) {
-  if (Array.isArray(collectionData?.entries)) return collectionData.entries;
-  return Array.isArray(collectionData?.originals) ? collectionData.originals : [];
-}
-
 async function parseCSV(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
 
     reader.onload = (event) => {
       try {
-        const text = String(event.target.result || "");
+        const text = event.target.result;
         const lines = text.split(/\r?\n/).filter(Boolean);
 
         if (lines.length < 2) throw new Error("CSV file appears to be empty.");
@@ -1174,7 +1077,7 @@ async function parseCSV(file) {
         }
 
         const byNormalized = new Map();
-        const firstSeenName = new Map();
+        const originals = [];
 
         for (let i = 1; i < lines.length; i++) {
           const cols = splitCsvLine(lines[i]);
@@ -1189,21 +1092,10 @@ async function parseCSV(file) {
 
           const normalizedName = normalizeCardName(rawName);
           byNormalized.set(normalizedName, (byNormalized.get(normalizedName) || 0) + quantity);
-          if (!firstSeenName.has(normalizedName)) firstSeenName.set(normalizedName, rawName);
+          originals.push({ rawName, normalizedName, quantity });
         }
 
-        const entries = Array.from(byNormalized.entries()).map(([normalizedName, quantity]) => ({
-          rawName: firstSeenName.get(normalizedName) || normalizedName,
-          normalizedName,
-          quantity
-        }));
-
-        resolve({
-          byNormalized,
-          entries,
-          originals: entries,
-          uniqueRawNames: entries.map((entry) => entry.rawName)
-        });
+        resolve({ byNormalized, originals });
       } catch (error) {
         reject(error);
       }
@@ -1212,6 +1104,38 @@ async function parseCSV(file) {
     reader.onerror = () => reject(new Error("Failed to read CSV file."));
     reader.readAsText(file);
   });
+}
+
+async function fetchWithRetry(url, options = {}, retryCount = 1, timeoutMs = 15000) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timer);
+      return response;
+    } catch (error) {
+      clearTimeout(timer);
+      lastError = error;
+      if (attempt < retryCount) await sleep(250 * (attempt + 1));
+    }
+  }
+
+  throw lastError || new Error(`Network request failed for ${url}`);
+}
+
+function buildEdhrecCommanderUrls(commanderName) {
+  const primaryName = getPrimaryCardName(commanderName);
+  const slug = toEdhrecSlug(primaryName);
+  const baseUrls = [
+    `${EDHREC_BASE}${slug}.json`,
+    `${EDHREC_BASE}${slug}/${slug}.json`
+  ];
+
+  return baseUrls.flatMap((baseUrl) => EDHREC_CORS_PROXIES.map((proxyFactory) => proxyFactory(baseUrl)));
 }
 
 function toEdhrecSlug(name) {
@@ -1232,35 +1156,33 @@ async function fetchScryfallCardByName(cardName) {
   const cleaned = cleanCardNameForLookup(cardName);
   if (!cleaned) throw new Error("Missing card name for Scryfall lookup.");
 
-  let response = await fetch(`${SCRYFALL_NAMED}${encodeCardNameForScryfall(cleaned)}`);
+  let response = await fetchWithRetry(`${SCRYFALL_NAMED}${encodeCardNameForScryfall(cleaned)}`);
   if (response.ok) return await response.json();
 
-  response = await fetch(`https://api.scryfall.com/cards/named?fuzzy=${encodeCardNameForScryfall(cleaned)}`);
+  response = await fetchWithRetry(`https://api.scryfall.com/cards/named?fuzzy=${encodeCardNameForScryfall(cleaned)}`);
   if (response.ok) return await response.json();
 
   throw new Error(`Scryfall lookup failed for ${cardName}`);
 }
 
 async function fetchEdhrecCommanderJson(commanderName) {
-  const primaryName = getPrimaryCardName(commanderName);
-  const slug = toEdhrecSlug(primaryName);
-  const urls = [
-    `${EDHREC_BASE}${slug}.json`,
-    `${EDHREC_BASE}${slug}/${slug}.json`
-  ];
+  const urls = buildEdhrecCommanderUrls(commanderName);
+  let lastError = null;
 
   for (const url of urls) {
     try {
-      const response = await fetch(url);
+      const response = await fetchWithRetry(url, {}, 1, 12000);
       if (response.ok) {
         return await response.json();
       }
+      lastError = new Error(`EDHREC request returned ${response.status} for ${url}`);
     } catch (error) {
+      lastError = error;
       console.warn("EDHREC fetch failed", url, error);
     }
   }
 
-  throw new Error(`Failed to fetch EDHREC commander data for ${commanderName}.`);
+  throw lastError || new Error(`Failed to fetch EDHREC commander data for ${commanderName}.`);
 }
 
 function convertScryfallCard(data) {
@@ -1314,16 +1236,8 @@ async function getEDHREC(commanderName) {
           name: card.name,
           synergy: Number(card.synergy || 0),
           decks: Number(card.num_decks || 0),
-          label: section.header || "",
-          labels: section.header ? [String(section.header)] : []
+          label: section.header || ""
         });
-      } else {
-        const existing = deduped.get(key);
-        existing.synergy = Math.max(Number(existing.synergy || 0), Number(card.synergy || 0));
-        existing.decks = Math.max(Number(existing.decks || 0), Number(card.num_decks || 0));
-        if (section.header && !existing.labels.includes(String(section.header))) {
-          existing.labels.push(String(section.header));
-        }
       }
     }
   }
@@ -1367,6 +1281,10 @@ function parseEdhrecSectionAverage(section) {
     if (match) return Number(match[1]);
   }
 
+  if (Array.isArray(section?.cardviews) && section.cardviews.length) {
+    return section.cardviews.length;
+  }
+
   return null;
 }
 
@@ -1389,80 +1307,19 @@ function extractEdhrecTypeAverages(data) {
   };
 
   const counts = {};
-  const maxReasonableTypeCount = 40;
-  const buckets = ["Creature", "Instant", "Sorcery", "Artifact", "Enchantment", "Planeswalker", "Land"];
 
-  function mapTypeBucket(label) {
-    const normalized = normalizeThemeName(label);
-    if (typeKeyMap[normalized]) return typeKeyMap[normalized];
-    if (normalized.includes("creature")) return "Creature";
-    if (normalized.includes("instant")) return "Instant";
-    if (normalized.includes("sorcer")) return "Sorcery";
-    if (normalized.includes("artifact")) return "Artifact";
-    if (normalized.includes("enchantment")) return "Enchantment";
-    if (normalized.includes("planeswalker")) return "Planeswalker";
-    if (normalized.includes("land")) return "Land";
-    return null;
-  }
-
-  function addCount(key, value, allowOverride = true) {
-    const bucket = mapTypeBucket(key);
+  function addCount(key, value) {
+    const bucket = typeKeyMap[normalizeThemeName(key)];
     const numeric = Number(value);
     if (!bucket || !Number.isFinite(numeric) || numeric < 0) return;
-    const bounded = Math.max(0, Math.min(maxReasonableTypeCount, Math.round(numeric)));
-    if (allowOverride) {
-      counts[bucket] = Math.max(counts[bucket] || 0, bounded);
-    } else if (counts[bucket] === undefined) {
-      counts[bucket] = bounded;
-    }
+    counts[bucket] = Math.max(counts[bucket] || 0, Math.round(numeric));
   }
 
-  function readDirectTypeCounts(source) {
-    if (!source || typeof source !== "object" || Array.isArray(source)) return null;
-    const out = {};
-    for (const [key, value] of Object.entries(source)) {
-      const bucket = mapTypeBucket(key);
-      const numeric = Number(value);
-      if (!bucket || !Number.isFinite(numeric) || numeric < 0) continue;
-      out[bucket] = Math.max(0, Math.min(maxReasonableTypeCount, Math.round(numeric)));
-    }
-
-    const populated = Object.keys(out).length;
-    if (populated < 3) return null;
-    if (!out.Land || !out.Creature) return null;
-    return out;
-  }
-
-  function scoreDirectCounts(typeCounts) {
-    if (!typeCounts) return -1;
-    const coverage = buckets.filter((bucket) => Number.isFinite(typeCounts[bucket])).length;
-    const total = buckets.reduce((sum, bucket) => sum + (Number(typeCounts[bucket]) || 0), 0);
-    const closeness = Math.max(0, 100 - Math.abs(99 - total));
-    return coverage * 100 + closeness;
-  }
-
-  const explicitCandidates = [
-    readDirectTypeCounts(data),
-    readDirectTypeCounts(data?.container?.json_dict),
-    readDirectTypeCounts(data?.container?.json_dict?.stats),
-    readDirectTypeCounts(data?.container?.json_dict?.meta),
-    readDirectTypeCounts(data?.meta)
-  ].filter(Boolean);
-
-  const preferredDirectCounts = explicitCandidates
-    .sort((a, b) => scoreDirectCounts(b) - scoreDirectCounts(a))[0] || null;
-
-  if (preferredDirectCounts) {
-    for (const [bucket, value] of Object.entries(preferredDirectCounts)) {
-      counts[bucket] = value;
-    }
-  }
-
-  function visit(node, depth = 0, allowOverride = true) {
+  function visit(node, depth = 0) {
     if (!node || depth > 6) return;
 
     if (Array.isArray(node)) {
-      for (const item of node) visit(item, depth + 1, allowOverride);
+      for (const item of node) visit(item, depth + 1);
       return;
     }
 
@@ -1471,18 +1328,15 @@ function extractEdhrecTypeAverages(data) {
     const keys = Object.keys(node);
     const hasTypeShape = keys.some((key) => typeKeyMap[normalizeThemeName(key)]);
     if (hasTypeShape) {
-      for (const [key, value] of Object.entries(node)) addCount(key, value, allowOverride);
+      for (const [key, value] of Object.entries(node)) addCount(key, value);
     }
 
     for (const value of Object.values(node)) {
-      if (value && typeof value === "object") visit(value, depth + 1, allowOverride);
+      if (value && typeof value === "object") visit(value, depth + 1);
     }
   }
 
-  visit(data, 0, !preferredDirectCounts);
-  if (data?.container?.json_dict && data.container.json_dict !== data) {
-    visit(data.container.json_dict, 0, !preferredDirectCounts);
-  }
+  visit(data?.container?.json_dict || data);
 
   const cardlists = data?.container?.json_dict?.cardlists;
   if (Array.isArray(cardlists)) {
@@ -1493,9 +1347,8 @@ function extractEdhrecTypeAverages(data) {
 
       let bucket = null;
       for (const label of labelCandidates) {
-        const mapped = mapTypeBucket(label);
-        if (mapped) {
-          bucket = mapped;
+        if (typeKeyMap[label]) {
+          bucket = typeKeyMap[label];
           break;
         }
       }
@@ -1503,10 +1356,7 @@ function extractEdhrecTypeAverages(data) {
 
       const average = parseEdhrecSectionAverage(section);
       if (!average && average !== 0) continue;
-      const bounded = Math.max(0, Math.min(maxReasonableTypeCount, Math.round(average)));
-      if (!preferredDirectCounts || counts[bucket] === undefined) {
-        counts[bucket] = Math.max(counts[bucket] || 0, bounded);
-      }
+      counts[bucket] = Math.max(counts[bucket] || 0, Math.round(average));
     }
   }
 
@@ -1602,7 +1452,7 @@ function buildTypeTargetPlan(edhrecTypeAverages, strategyProfile, targetLandCoun
   const defaults = {
     Creature: strategyProfile.wantsCreatures
       ? (strategyProfile.wantsTribal || strategyProfile.wantsGoWide ? 26 : 20)
-      : 15,
+      : 12,
     Instant: strategyProfile.wantsCantrips ? 10 : 7,
     Sorcery: strategyProfile.wantsCantrips ? 11 : 8,
     Artifact: themeSignals?.has?.("artifacts") ? 11 : 7,
@@ -1640,7 +1490,7 @@ function buildTypeTargetPlan(edhrecTypeAverages, strategyProfile, targetLandCoun
   while (assigned > targetNonlandCount) {
     for (const bucket of ["Planeswalker", "Sorcery", "Instant", "Enchantment", "Artifact", "Creature"]) {
       const minimumFloor = bucket === "Creature"
-        ? 8
+        ? Math.max(8, strategyProfile.wantsCreatures ? 14 : 8)
         : bucket === "Planeswalker" ? 0 : 1;
       if (scaled[bucket] > minimumFloor) {
         scaled[bucket] -= 1;
@@ -1650,53 +1500,17 @@ function buildTypeTargetPlan(edhrecTypeAverages, strategyProfile, targetLandCoun
     }
   }
 
-  const providedCreature = Number(edhrecTypeAverages?.Creature);
-  const providedNonlandTotal = buckets.reduce((sum, bucket) => {
-    const value = Number(edhrecTypeAverages?.[bucket]);
-    return sum + (Number.isFinite(value) && value >= 0 ? value : 0);
-  }, 0);
-
-  const desiredCreatureTargetFromEdhrec =
-    Number.isFinite(providedCreature) && providedCreature > 0
-      ? Math.round(
-        providedNonlandTotal > 0
-          ? (providedCreature / providedNonlandTotal) * targetNonlandCount
-          : providedCreature
-      )
-      : null;
-
-  if (desiredCreatureTargetFromEdhrec && scaled.Creature < desiredCreatureTargetFromEdhrec) {
-    const boost = desiredCreatureTargetFromEdhrec - scaled.Creature;
-    scaled.Creature += boost;
-    assigned += boost;
-  }
-
-  while (assigned > targetNonlandCount) {
-    for (const bucket of ["Planeswalker", "Sorcery", "Instant", "Enchantment", "Artifact"]) {
-      const minimumFloor = bucket === "Planeswalker" ? 0 : 1;
-      if (scaled[bucket] > minimumFloor) {
-        scaled[bucket] -= 1;
-        assigned -= 1;
-      }
-      if (assigned <= targetNonlandCount) break;
-    }
-    if (assigned > targetNonlandCount && scaled.Creature > 8) {
-      scaled.Creature -= 1;
-      assigned -= 1;
-    }
-  }
-
   const plan = {};
   for (const bucket of buckets) {
     const target = scaled[bucket];
-    const flex = 2;
+    const flex = bucket === "Planeswalker" ? 1 : 2;
     const minimumFloor = bucket === "Creature"
-      ? 8
+      ? Math.max(8, strategyProfile.wantsCreatures ? 14 : 8)
       : bucket === "Planeswalker" ? 0 : 1;
     plan[bucket] = {
       target,
       min: Math.max(minimumFloor, target - flex),
-      max: Math.max(target, target + flex)
+      max: target + flex
     };
   }
 
@@ -1817,53 +1631,35 @@ async function fetchCardDataBatchWithProgress(cardNames, progressCallback) {
   }
 
   const chunkSize = 75;
-  const chunks = [];
+
   for (let i = 0; i < missingNames.length; i += chunkSize) {
-    chunks.push(missingNames.slice(i, i + chunkSize));
-  }
+    const chunk = missingNames.slice(i, i + chunkSize);
+    const identifiers = chunk.map((name) => ({ name }));
 
-  let chunkIndex = 0;
-  const maxConcurrent = 2;
+    const response = await fetchWithRetry(SCRYFALL_COLLECTION, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifiers })
+    });
 
-  async function worker() {
-    while (true) {
-      const index = chunkIndex++;
-      if (index >= chunks.length) return;
+    if (!response.ok) throw new Error("Scryfall collection request failed.");
 
-      const chunk = chunks[index];
-      const identifiers = chunk.map((name) => ({ name }));
+    const data = await response.json();
+    const returnedCards = Array.isArray(data.data) ? data.data : [];
 
-      const response = await fetch(SCRYFALL_COLLECTION, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ identifiers })
-      });
-
-      if (!response.ok) throw new Error("Scryfall collection request failed.");
-
-      const data = await response.json();
-      const returnedCards = Array.isArray(data.data) ? data.data : [];
-
-      for (const rawCard of returnedCards) {
-        const converted = convertScryfallCard(rawCard);
-        cardCache.set(normalizeCardName(converted.name), converted);
-      }
-
-      for (const requestedName of chunk) {
-        if (!cardCache.has(requestedName)) cardCache.set(requestedName, null);
-      }
-
-      done += chunk.length;
-      if (progressCallback) progressCallback(done, total);
-      await sleep(15);
+    for (const rawCard of returnedCards) {
+      const converted = convertScryfallCard(rawCard);
+      cardCache.set(normalizeCardName(converted.name), converted);
     }
+
+    for (const requestedName of chunk) {
+      if (!cardCache.has(requestedName)) cardCache.set(requestedName, null);
+    }
+
+    done += chunk.length;
+    if (progressCallback) progressCallback(done, total);
+    await sleep(80);
   }
-
-  await Promise.all(
-    Array.from({ length: Math.min(maxConcurrent, chunks.length) }, () => worker())
-  );
-
-  persistCardCacheToStorage();
 
   const results = new Map();
   for (const name of uniqueNames) {
@@ -1923,9 +1719,12 @@ async function detectCommanderThemes(edhrecCards, edhrecTags, collectionData, al
   }
 
   const ownedThemeCandidates = [];
-  const collectionEntries = getCollectionEntries(collectionData);
-  for (const entry of collectionEntries) {
+  const seenOwned = new Set();
+
+  for (const entry of collectionData.originals) {
     if (ownedThemeCandidates.length >= 80) break;
+    if (seenOwned.has(entry.normalizedName)) continue;
+    seenOwned.add(entry.normalizedName);
 
     const card = allOwnedCardData.get(entry.normalizedName);
     if (!card) continue;
@@ -2110,31 +1909,35 @@ function getCommanderStrategyProfile(commanderName, commanderThemes, commanderCo
 }
 
 function getModePreferences(mode, strategyProfile) {
-  const modeParts = String(mode || "").split("|").map((part) => part.trim()).filter(Boolean);
-  const themePart = modeParts.find((part) => part.startsWith("theme:"));
-
-  const themeFocus = themePart ? themePart.slice(6) : "";
+  const themeFocus = mode.startsWith("theme:") ? mode.slice(6) : "";
+  const bracketTarget = mode.startsWith("bracket:") ? Number(mode.slice(8)) : null;
+  const lowerBracket = bracketTarget && bracketTarget <= 2;
+  const higherBracket = bracketTarget && bracketTarget >= 4;
   const focusedThemeSignal = normalizeThemeName(themeFocus);
   const tribalFocus = getCommanderTribalThemes(themeFocus ? [themeFocus] : []).length > 0;
-  const focusedTribalTypes = getCommanderTribalThemes(themeFocus ? [themeFocus] : []).map((theme) => theme.replace(" tribal", ""));
-  const themeFocusAliases = themeFocus ? getThemeAliases(themeFocus).map((alias) => normalizeThemeName(alias)) : [];
   const creatureFocusedTheme = ["tokens", "blink", "reanimator", "elves", "zombies", "goblins", "humans", "angels", "dragons", "bears"].includes(focusedThemeSignal);
 
   return {
     mode,
     themeFocus,
     focusedThemeSignal,
-    focusedTribalTypes,
-    themeFocusAliases,
+    bracketTarget,
     synergyBias:
-      themeFocus ? 1.45 : 1,
+      themeFocus ? 1.35 :
+      higherBracket ? 1.3 :
+      lowerBracket ? 0.92 :
+      1,
     creatureBias:
       tribalFocus || creatureFocusedTheme ? 1.3 :
       strategyProfile.wantsCreatures ? 1.1 : 1,
-    casualBias: 1,
-    manaBaseBias: 1,
-    fewerStaplesBias: 1,
-    tribalBias: tribalFocus ? 1.55 : 1
+    casualBias: lowerBracket ? 1.45 : 1,
+    manaBaseBias: higherBracket ? 1.2 : 1,
+    fewerStaplesBias: mode === "fewer-staples" || lowerBracket ? 1.5 : 1,
+    tribalBias: tribalFocus ? 1.55 : 1,
+    minimumCreatureBonus:
+      tribalFocus ? 6 :
+      creatureFocusedTheme ? 4 :
+      0
   };
 }
 
@@ -2348,89 +2151,6 @@ function detectCardTags(card) {
   return tags;
 }
 
-function getThemeFocusAdjustment(card, tags, modePrefs) {
-  if (!modePrefs.themeFocus) return 0;
-
-  const focusAliases = new Set((modePrefs.themeFocusAliases || []).map((alias) => normalizeThemeName(alias)));
-  const normalizedTags = tags.map((tag) => normalizeThemeName(tag));
-  const matchedFocusedTag = normalizedTags.some((tag) => focusAliases.has(tag));
-  let adjustment = matchedFocusedTag ? 18 : -5;
-
-  if (modePrefs.focusedThemeSignal === "artifacts" && getCardType(card).includes("artifact")) adjustment += 8;
-  if (modePrefs.focusedThemeSignal === "enchantments" && getCardType(card).includes("enchantment")) adjustment += 8;
-  if (["spellslinger", "cantrips"].includes(modePrefs.focusedThemeSignal) && (getCardType(card).includes("instant") || getCardType(card).includes("sorcery"))) adjustment += 9;
-  if (["tokens", "gowide"].includes(modePrefs.focusedThemeSignal) && (isTokenMaker(card) || isCreatureCard(card))) adjustment += 9;
-  if (["sacrifice", "aristocrats"].includes(modePrefs.focusedThemeSignal) && isSacrificeCard(card)) adjustment += 8;
-  if (["counters", "countersmatter"].includes(modePrefs.focusedThemeSignal) && normalizedTags.includes("counters")) adjustment += 8;
-  if (["graveyard", "reanimator"].includes(modePrefs.focusedThemeSignal) && (normalizedTags.includes("graveyard") || normalizedTags.includes("reanimator"))) adjustment += 9;
-
-  for (const tribe of modePrefs.focusedTribalTypes || []) {
-    if (hasTribalType(card, tribe)) adjustment += 12;
-  }
-
-  return adjustment;
-}
-
-function edhrecLabelMatchesTheme(label, modePrefs) {
-  if (!modePrefs.themeFocus) return true;
-  const normalizedLabel = normalizeThemeName(label);
-  return (modePrefs.themeFocusAliases || []).some((alias) => normalizedLabel.includes(alias));
-}
-
-function getEdhrecReferenceBonus(edhrecCard, modePrefs) {
-  if (!edhrecCard) return 0;
-  const labels = Array.isArray(edhrecCard.labels) && edhrecCard.labels.length
-    ? edhrecCard.labels
-    : [edhrecCard.label || ""];
-  const normalizedLabels = labels.map((label) => normalizeThemeName(label)).filter(Boolean);
-  if (!normalizedLabels.length) return 0;
-
-  let themeMatch = false;
-  let averageDeckSection = false;
-
-  for (const label of normalizedLabels) {
-    if (!themeMatch && edhrecLabelMatchesTheme(label, modePrefs)) themeMatch = true;
-
-    if (label.includes("average deck") || label.includes("average decks")) {
-      averageDeckSection = true;
-    }
-  }
-
-  let bonus = 0;
-  if (modePrefs.themeFocus) bonus += themeMatch ? 12 : -10;
-  if (averageDeckSection) bonus += 6;
-
-  return bonus;
-}
-
-function cardMatchesThemeFocus(card, modePrefs) {
-  if (!modePrefs.themeFocus) return true;
-
-  const tags = detectCardTags(card).map((tag) => normalizeThemeName(tag));
-  const aliases = new Set((modePrefs.themeFocusAliases || []).map((alias) => normalizeThemeName(alias)));
-  if (tags.some((tag) => aliases.has(tag))) return true;
-
-  for (const tribe of modePrefs.focusedTribalTypes || []) {
-    if (hasTribalType(card, tribe)) return true;
-  }
-
-  return false;
-}
-
-function classifyBackfillModeFit(card, modePrefs) {
-  const themeMatch = cardMatchesThemeFocus(card, modePrefs);
-  const role = detectRole(card);
-  const supportRole = ["ramp", "draw", "removal", "wipe"].includes(role);
-
-  const strict = themeMatch;
-  const relaxed = supportRole;
-  return {
-    strict,
-    relaxed,
-    tier: strict ? 0 : relaxed ? 1 : 2
-  };
-}
-
 function scoreCard(card, edhrecCard, commanderThemes, strategyProfile, commanderColors, modePrefs) {
   const synergyScore = Number(edhrecCard.synergy || 0) * 6;
   const popularityScore = Math.min(Number(edhrecCard.decks || 0) / 1200, 18);
@@ -2470,8 +2190,6 @@ function scoreCard(card, edhrecCard, commanderThemes, strategyProfile, commander
   if (themeSignals.has("group hug") && tags.includes("opponent draw")) themeBonus += 4;
   if (themeSignals.has("counters") && tags.includes("counters")) themeBonus += 4;
   if (themeSignals.has("cantrips") && tags.includes("cantrips")) themeBonus += 3;
-  themeBonus += getThemeFocusAdjustment(card, tags, modePrefs);
-  themeBonus += getEdhrecReferenceBonus(edhrecCard, modePrefs);
 
   let penalty = 0;
   if (isLowPriorityMonoColorRock(card, commanderColors, strategyProfile)) penalty += 8;
@@ -2500,8 +2218,6 @@ function scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColo
     if (themeSignals.has(normalizeThemeName(tag))) score += 4 * modePrefs.synergyBias;
   }
 
-  score += getThemeFocusAdjustment(card, tags, modePrefs);
-
   if (strategyProfile.wantsCreatures && isCreatureCard(card)) score += 6 * modePrefs.creatureBias;
   if (strategyProfile.wantsTokens && isTokenMaker(card)) score += 8 * modePrefs.synergyBias;
   if (strategyProfile.wantsSacrifice && isSacrificeCard(card)) score += 7 * modePrefs.synergyBias;
@@ -2527,32 +2243,6 @@ function legalForCommander(cardColors, commanderColors) {
   return true;
 }
 
-function getProducedManaColors(card) {
-  const valid = new Set(["W", "U", "B", "R", "G"]);
-  const directProduced = Array.isArray(card?.producedMana) ? card.producedMana : [];
-  const produced = new Set(
-    directProduced
-      .map((color) => String(color || "").toUpperCase())
-      .filter((color) => valid.has(color))
-  );
-
-  const text = getCardText(card);
-  if (text.includes("mana of any color")) {
-    for (const color of ["W", "U", "B", "R", "G"]) produced.add(color);
-  }
-
-  const addLines = text.split("\n").filter((line) => line.includes("add"));
-  for (const line of addLines) {
-    const matches = line.match(/\{([wubrg])\}/g) || [];
-    for (const symbol of matches) {
-      const color = symbol.replace(/[{}]/g, "").toUpperCase();
-      if (valid.has(color)) produced.add(color);
-    }
-  }
-
-  return sortColorsWubrg(Array.from(produced));
-}
-
 function recommendLandCount(commanderColors) {
   if (commanderColors.length === 0) return 38;
   if (commanderColors.length === 1) return 36;
@@ -2560,17 +2250,17 @@ function recommendLandCount(commanderColors) {
   return 38;
 }
 
-function evaluateNonbasicLand(card, commanderColors, strategyProfile, modePrefs, edhrecCardLookup = null) {
+function evaluateNonbasicLand(card, commanderColors, strategyProfile, modePrefs) {
   if (!getCardType(card).includes("land")) return null;
   if (isBasicLand(card.name)) return null;
 
-  const produced = getProducedManaColors(card);
+  const produced = Array.isArray(card.producedMana) ? card.producedMana : [];
   const relevantProduced = produced.filter((c) => commanderColors.includes(c));
   const normalizedName = normalizeCardName(card.name);
   const text = getCardText(card);
 
   let score = 0;
-  score += relevantProduced.length * 6;
+  score += relevantProduced.length * 4;
 
   if (normalizedName === "command tower") score += 10;
   if (normalizedName === "exotic orchard") score += 7;
@@ -2588,7 +2278,7 @@ function evaluateNonbasicLand(card, commanderColors, strategyProfile, modePrefs,
   if (strategyProfile.wantsSacrifice && text.includes("sacrifice")) score += 4;
   if (strategyProfile.wantsGoWide && text.includes("creature")) score += 2;
 
-  if (text.includes("enters tapped")) score -= 2;
+  if (text.includes("enters tapped")) score -= 4;
   if (text.includes("unless you control")) score -= 1;
   if (text.includes("pay 1 life")) score -= 0.5;
   if (relevantProduced.length === 0) score -= 20;
@@ -2596,21 +2286,6 @@ function evaluateNonbasicLand(card, commanderColors, strategyProfile, modePrefs,
   if (strategyProfile.monoColor) {
     if (!isSynergisticMonoColorLand(card, commanderColors, strategyProfile)) score -= 12;
     if (isLowPriorityMonoColorFixer(card, commanderColors)) score -= 12;
-  }
-
-  if (modePrefs.themeFocus) {
-    if (cardMatchesThemeFocus(card, modePrefs)) score += 5;
-    else score -= 6;
-  }
-
-  const edhrecEntry = edhrecCardLookup?.get(normalizedName);
-  if (edhrecEntry) {
-    score += Math.max(0, Number(edhrecEntry.synergy || 0)) * 0.8;
-    score += Math.min(12, Number(edhrecEntry.decks || 0) / 350);
-    const labels = Array.isArray(edhrecEntry.labels)
-      ? edhrecEntry.labels.map((x) => normalizeThemeName(x))
-      : [normalizeThemeName(edhrecEntry.label)];
-    if (labels.some((label) => label.includes("land"))) score += 4;
   }
 
   score *= modePrefs.manaBaseBias;
@@ -2626,12 +2301,14 @@ function evaluateNonbasicLand(card, commanderColors, strategyProfile, modePrefs,
   };
 }
 
-function buildNonbasicManaBase(collectionData, allOwnedCardData, commanderColors, targetLandCount, strategyProfile, modePrefs, edhrecCardLookup = null) {
+function buildNonbasicManaBase(collectionData, allOwnedCardData, commanderColors, targetLandCount, strategyProfile, modePrefs) {
   const landPool = [];
-  const entries = getCollectionEntries(collectionData);
+  const seen = new Set();
 
-  for (const entry of entries) {
+  for (const entry of collectionData.originals) {
     const normalizedName = entry.normalizedName;
+    if (seen.has(normalizedName)) continue;
+    seen.add(normalizedName);
 
     const card = allOwnedCardData.get(normalizedName);
     if (!card) continue;
@@ -2639,7 +2316,7 @@ function buildNonbasicManaBase(collectionData, allOwnedCardData, commanderColors
     if (isBasicLand(card.name)) continue;
     if (!legalForCommander(card.colors, commanderColors)) continue;
 
-    const landCandidate = evaluateNonbasicLand(card, commanderColors, strategyProfile, modePrefs, edhrecCardLookup);
+    const landCandidate = evaluateNonbasicLand(card, commanderColors, strategyProfile, modePrefs);
     if (!landCandidate) continue;
     landPool.push(landCandidate);
   }
@@ -2648,9 +2325,9 @@ function buildNonbasicManaBase(collectionData, allOwnedCardData, commanderColors
 
   const threshold =
     commanderColors.length === 1 ? 7 :
-    commanderColors.length === 2 ? 4 :
-    commanderColors.length === 3 ? 3 :
-    2;
+    commanderColors.length === 2 ? 6 :
+    commanderColors.length === 3 ? 5 :
+    4;
 
   const filtered = landPool.filter((land) => land.score >= threshold);
 
@@ -2719,8 +2396,7 @@ function buildDeckFromScoredPool(
   commanderName,
   modePrefs,
   edhrecTypeAverages = null,
-  edhrecRoleTargets = null,
-  edhrecCards = []
+  edhrecRoleTargets = null
 ) {
   const deck = [];
   const usedNames = new Set();
@@ -2731,9 +2407,6 @@ function buildDeckFromScoredPool(
   const typePlan = buildTypeTargetPlan(edhrecTypeAverages, strategyProfile, recommendedLandCount, commanderThemes);
   const targetLandCount = typePlan.landCount;
   const targetNonlandCount = typePlan.nonlandCount;
-  const edhrecCardLookup = new Map(
-    (Array.isArray(edhrecCards) ? edhrecCards : []).map((entry) => [normalizeCardName(entry.name), entry])
-  );
 
   const roleTargets = {
     ramp: Math.round(Number(edhrecRoleTargets?.ramp) || 10),
@@ -2742,10 +2415,23 @@ function buildDeckFromScoredPool(
     wipe: Math.round(Number(edhrecRoleTargets?.wipe) || 3)
   };
 
+  if (typePlan?.buckets?.Creature) {
+    typePlan.buckets.Creature.min = Math.max(
+      typePlan.buckets.Creature.min,
+      strategyProfile.wantsCreatures
+        ? (strategyProfile.wantsTribal || strategyProfile.wantsGoWide ? 22 : 16) + modePrefs.minimumCreatureBonus
+        : 10 + Math.floor(modePrefs.minimumCreatureBonus / 2)
+    );
+    typePlan.buckets.Creature.max = Math.max(typePlan.buckets.Creature.max, typePlan.buckets.Creature.min);
+  }
+
   const fallbackPool = [];
-  const collectionEntries = getCollectionEntries(collectionData);
-  for (const entry of collectionEntries) {
+  const seenFallback = new Set();
+
+  for (const entry of collectionData.originals) {
     const normalizedName = entry.normalizedName;
+    if (seenFallback.has(normalizedName)) continue;
+    seenFallback.add(normalizedName);
     if (normalizedName === normalizedCommander) continue;
 
     const card = allOwnedCardData.get(normalizedName);
@@ -2753,18 +2439,13 @@ function buildDeckFromScoredPool(
     if (getCardType(card).includes("land")) continue;
     if (!legalForCommander(card.colors, commanderColors)) continue;
 
-    const fit = classifyBackfillModeFit(card, modePrefs);
-    if (fit.tier >= 2) continue;
-    const modeFitAdjustment = fit.tier === 0 ? 12 : -10;
-
     fallbackPool.push({
       name: card.name,
       role: detectRole(card),
-      score: scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColors, modePrefs) + modeFitAdjustment,
+      score: scoreFallbackCard(card, commanderThemes, strategyProfile, commanderColors, modePrefs),
       type: getCardType(card),
       cmc: card.cmc,
-      colors: card.colors,
-      modeFitTier: fit.tier
+      colors: card.colors
     });
   }
 
@@ -2867,8 +2548,7 @@ function buildDeckFromScoredPool(
     commanderColors,
     targetLandCount,
     strategyProfile,
-    modePrefs,
-    edhrecCardLookup
+    modePrefs
   );
 
   let remainingLandCount = targetLandCount - selectedNonbasicLands.length;
@@ -3258,8 +2938,7 @@ function displayWarnings(warnings) {
 
 function renderColorPips(colors) {
   colorPips.innerHTML = "";
-  const orderedColors = sortColorsWubrg(colors);
-  const displayColors = orderedColors.length ? orderedColors : ["C"];
+  const displayColors = colors.length ? colors : ["C"];
 
   for (const color of displayColors) {
     const span = document.createElement("span");
@@ -3289,16 +2968,8 @@ function displayCommanderCard(commanderData) {
     commanderImageSkeleton.classList.add("hidden");
   }
 
-  const orderedIdentity = sortColorsWubrg(commanderData.colors || []);
-  const colorIdentity = orderedIdentity.join("") || "Colorless";
-  const metaLines = [
-    commanderData?.name || "",
-    commanderData?.rawType || "Unknown type",
-    commanderData?.manaCost ? `Mana Cost: ${commanderData.manaCost}` : "Mana Cost: N/A",
-    `Color Identity: ${colorIdentity}`
-  ].filter(Boolean);
-  commanderMeta.textContent = metaLines.join("\n");
-  renderColorPips(orderedIdentity);
+  commanderMeta.textContent = "";
+  renderColorPips(commanderData.colors);
 }
 
 function clearCommanderCard() {
@@ -3330,7 +3001,7 @@ function displayExportPreview(deck, commanderName, commanderThemes, strategyProf
 
   if (!deck?.length) {
     bindPreviewHoverImages();
-    renderPreviewEmptyState();
+renderPreviewEmptyState();
     return;
   }
 
@@ -3444,11 +3115,7 @@ async function copyMoxfieldExport() {
 
 async function generateDeck() {
   const commanderName = commanderInput.value.trim();
-  const file = csvFileInput?.files?.[0];
-
-  currentRunContext = null;
-  currentThemeFocus = "";
-  document.getElementById("postBuildControls").classList.add("hidden");
+  const file = document.getElementById("csvFile").files[0];
 
   clearLog();
   clearCommanderCard();
@@ -3490,11 +3157,20 @@ async function generateDeck() {
 
     updateProgress(18, "Fetching EDHREC synergy data...");
     logMessage("Loading commander recommendations from EDHREC.");
-    const edhrecData = await getEDHREC(commanderData.name);
+    let edhrecData = { cards: [], tags: [], typeAverages: null, roleTargets: null };
+    try {
+      edhrecData = await getEDHREC(commanderData.name);
+    } catch (error) {
+      console.warn("Continuing without EDHREC data.", error);
+      logMessage(`WARNING: EDHREC could not be reached (${error?.message || "network error"}). Falling back to theme-aware collection scoring.`);
+    }
     const edhrecCards = Array.isArray(edhrecData?.cards) ? edhrecData.cards : [];
     const edhrecTags = Array.isArray(edhrecData?.tags) ? edhrecData.tags : [];
-    if (!edhrecCards.length) throw new Error("No EDHREC data returned for this commander.");
-    logMessage(`EDHREC returned ${edhrecCards.length} candidate cards.`);
+    if (edhrecCards.length) {
+      logMessage(`EDHREC returned ${edhrecCards.length} candidate cards.`);
+    } else {
+      logMessage("No EDHREC card candidates available; using collection backfill and theme scoring only.");
+    }
     if (edhrecTags.length) {
       logMessage(`Using EDHREC tags: ${edhrecTags.map(formatThemeLabel).join(", ")}`);
     }
@@ -3514,9 +3190,7 @@ async function generateDeck() {
     }
 
     updateProgress(30, "Fetching collection metadata for theme discovery...");
-    const allOwnedNames = Array.isArray(collection.uniqueRawNames)
-      ? collection.uniqueRawNames
-      : getCollectionEntries(collection).map((x) => x.rawName);
+    const allOwnedNames = collection.originals.map((x) => x.rawName);
     const allOwnedCardData = await fetchCardDataBatchWithProgress(
       allOwnedNames,
       (done, total) => {
@@ -3535,6 +3209,7 @@ async function generateDeck() {
       commanderData.colors
     );
     displayThemes(commanderThemes);
+    currentBuildMode = "balanced";
     renderPriorityButtons(commanderThemes);
     logMessage(`Detected themes: ${commanderThemes.join(", ") || "none"}`);
 
@@ -3568,8 +3243,6 @@ async function generateDeck() {
     document.getElementById("postBuildControls").classList.remove("hidden");
   } catch (error) {
     console.error(error);
-    currentRunContext = null;
-    document.getElementById("postBuildControls").classList.add("hidden");
     updateProgress(0, "Error");
     renderPreviewErrorState(error?.message || "Unable to render deck preview.");
     logMessage(`ERROR: ${error.message}`);
@@ -3581,18 +3254,14 @@ async function generateDeck() {
 
 async function regenerateWithMode(mode) {
   if (!currentRunContext) return;
-  if (mode.startsWith("theme:")) {
-    const pickedTheme = mode.slice(6);
-    currentThemeFocus = currentThemeFocus === pickedTheme ? "" : pickedTheme;
-  }
+  currentBuildMode = mode;
   updatePriorityButtons();
   setGenerateEnabled(false);
   try {
-    const modeLabel = getCurrentBuildMode() || "default";
-    logMessage(`Regenerating with priority mode: ${modeLabel}.`);
-    updateProgress(90, "Regenerating deck...", modeLabel);
+    logMessage(`Regenerating with priority mode: ${mode}.`);
+    updateProgress(90, "Regenerating deck...", mode);
     await performBuildFromContext();
-    updateProgress(100, "Deck complete!", `${modeLabel}`);
+    updateProgress(100, "Deck complete!", `${currentBuildMode}`);
   } catch (error) {
     console.error(error);
     renderPreviewErrorState(error?.message || "Unable to regenerate deck preview.");
@@ -3621,7 +3290,7 @@ async function performBuildFromContext() {
     commanderData.colors
   );
 
-  const modePrefs = getModePreferences(getCurrentBuildMode(), strategyProfile);
+  const modePrefs = getModePreferences(currentBuildMode, strategyProfile);
 
   updateProgress(78, "Checking legality and scoring cards...");
   const scoredNonlands = [];
@@ -3635,12 +3304,6 @@ async function performBuildFromContext() {
     const card = ownedCardData.get(normalizedName);
 
     if (!card || getCardType(card).includes("land") || !legalForCommander(card.colors, commanderData.colors)) {
-      maybeUpdateScoringProgress(processed, totalToScore);
-      continue;
-    }
-
-    const referenceBonus = getEdhrecReferenceBonus(edhrecCard, modePrefs);
-    if (modePrefs.themeFocus && referenceBonus <= -16) {
       maybeUpdateScoringProgress(processed, totalToScore);
       continue;
     }
@@ -3678,7 +3341,6 @@ async function performBuildFromContext() {
   }
 
   logMessage(`After legality checks, ${scoredNonlands.length} nonland cards remain in the EDHREC candidate pool.`);
-  renderPriorityButtons(commanderThemes);
 
   updateProgress(90, "Building deck structure and mana base...");
   const finalDeck = buildDeckFromScoredPool(
@@ -3690,8 +3352,7 @@ async function performBuildFromContext() {
     commanderData.name,
     modePrefs,
     typeAverages,
-    roleTargets,
-    edhrecCards
+    roleTargets
   );
 
   logMessage(`Built final deck with ${finalDeck.length} cards.`);
@@ -3726,6 +3387,4 @@ async function performBuildFromContext() {
 
 
 bindPreviewHoverImages();
-hydrateCardCacheFromStorage();
 renderPreviewEmptyState();
-updateGenerateButtonState();
